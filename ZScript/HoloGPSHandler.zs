@@ -7,12 +7,12 @@
 //   are class members resized once, avoiding frame-by-frame allocation/deallocation to bypass GC thrashing.
 // - Performance Optimization: Config CVars are cached (`cache_enabled`, `cache_freq`, etc.) because GZDoom CVar lookups
 //   incur string hash stutters if evaluated per-frame. Logic executes on a throttled tick interval (`cache_freq`).
-// - Multi-Stage Pathfinding State Machine:
-//   1. ASTAR_DIRECT: Attempts to find the shortest Euclidean path from player to target (keys first, then exits).
-//   2. ASTAR_PEDESTAL: Fallback search if a target is raised on a pedestal/pillar (finds adjacent walkable sectors).
-//   3. REVERSE_BFS: If direct A* fails, runs a reverse topological BFS from the target to find the first impassable
+// - Multi-Stage Pathfinding (Synchronous):
+//   1. A* Direct: Attempts to find the shortest path from player to target (keys first, then exits).
+//   2. Pedestal Retry: Fallback search if a target is raised on a pedestal/pillar (finds adjacent walkable sectors).
+//   3. Reverse BFS: If direct A* fails, runs a reverse topological BFS from the target to find the first impassable
 //      barrier/door. Then scans map lines for switches that open this barrier.
-//   4. ASTAR_SWITCH: Routes the player to the closest reachable switch that unlocks the barrier first, solving the map puzzle.
+//   4. Switch Routing: Routes the player to the closest reachable switch that unlocks the barrier first, solving the map puzzle.
 class HoloGPSHandler : StaticEventHandler
 {
     // Navigation geometry thresholds
@@ -37,34 +37,7 @@ class HoloGPSHandler : StaticEventHandler
     Actor currentTarget;
     int tickCounter;
     bool pathFresh; // True when FindNextObjective just found a target (path already computed)
-    Actor lastTarget;
-    int lastPlayerSectorIdx;
-    int lastTargetSectorIdx;
     Array<Actor> activeMarkers;
-
-    const ASYNC_STATE_IDLE = 0;
-    const ASYNC_STATE_ASTAR_DIRECT = 1;
-    const ASYNC_STATE_ASTAR_PEDESTAL = 2;
-    const ASYNC_STATE_REVERSE_BFS = 3;
-    const ASYNC_STATE_ASTAR_SWITCH = 4;
-
-    int searchState;
-    int searchStartIdx;
-    int searchEndIdx;
-    int searchRealEndIdx;
-    int searchAlternativeEndIdx;
-    Vector2 searchTargetPos;
-    Actor searchPlayer;
-    Actor searchTarget;
-
-    // For reverse BFS (Phase 3)
-    int searchQHeadReverse;
-    Sector searchBarrierSec;
-    bool searchBarrierFound;
-    int searchBestSwitchSector;
-    Line searchBestSwitchLine;
-    int searchMinPathSteps;
-    int searchLi;
 
     // Consolidated reusable tracer instance to avoid garbage collector load
     PathfinderTracer mTracer;
@@ -143,7 +116,6 @@ class HoloGPSHandler : StaticEventHandler
         refinedX.Clear();
         refinedY.Clear();
         graphBuilt = 0;
-        searchState = ASYNC_STATE_IDLE;
         
         mTracer = new("PathfinderTracer");
 
@@ -343,34 +315,10 @@ class HoloGPSHandler : StaticEventHandler
         if (currentTarget)
         {
             ClearOldMarkers();
-
-            Sector pSec = level.PointInSector(plyr.mo.pos.xy);
-            Sector tSec = level.PointInSector(currentTarget.pos.xy);
-            int pIdx = pSec ? pSec.sectornum : -1;
-            int tIdx = tSec ? tSec.sectornum : -1;
-
-            bool needsRebuild = true;
-            if (!pathFresh && currentTarget == lastTarget && pIdx == lastPlayerSectorIdx && tIdx == lastTargetSectorIdx)
+            if (!pathFresh)
             {
-                needsRebuild = false;
+                FindPathAStar(plyr.mo, currentTarget);
             }
-
-            if (needsRebuild)
-            {
-                if (!pathFresh)
-                {
-                    StartAsyncSearch(plyr.mo, currentTarget);
-                }
-                lastTarget = currentTarget;
-                lastPlayerSectorIdx = pIdx;
-                lastTargetSectorIdx = tIdx;
-            }
-
-            if (searchState != ASYNC_STATE_IDLE)
-            {
-                TickAsyncSearch();
-            }
-
             pathFresh = false;
             RefinePath(plyr.mo.pos.xy, plyr.mo.pos.z);
             SpawnPathMarkers(plyr.mo);
@@ -404,7 +352,6 @@ class HoloGPSHandler : StaticEventHandler
     //   and routes the player to the nearest exit.
     void FindNextObjective()
     {
-        searchState = ASYNC_STATE_IDLE;
         PlayerInfo plyr = players[consoleplayer];
         if (!plyr || !plyr.mo) return;
 
@@ -845,7 +792,10 @@ class HoloGPSHandler : StaticEventHandler
         }
     }
 
-    void InitAStarAsync(int startIdx, int goalIdx, Vector2 targetPos, Actor player)
+    // Reusable A* core with 3D floor awareness and portal support.
+    // Resets arrays, seeds startIdx, and expands until goalIdx is found.
+    // Returns 1 if goal reached, 0 otherwise. Populates parent/parentLine/reachable/gScore/fScore/sectorZ.
+    int RunAStar(int startIdx, int goalIdx, Vector2 targetPos, Actor player)
     {
         int numSectors = level.sectors.Size();
         openSet.Clear();
@@ -871,21 +821,11 @@ class HoloGPSHandler : StaticEventHandler
         sectorZ[startIdx] = player.pos.z;
         HeapPush(startIdx);
 
-        searchStartIdx = startIdx;
-        searchEndIdx = goalIdx;
-        searchTargetPos = targetPos;
-        searchPlayer = player;
-    }
-
-    int ResumeAStarAsync(int limit)
-    {
-        int iterations = 0;
-        while (openSet.Size() > 0 && iterations < limit)
+        while (openSet.Size() > 0)
         {
-            iterations++;
             int current = HeapPop();
             inOpenSet[current] = false;
-            if (current == searchEndIdx) return 1;
+            if (current == goalIdx) return 1;
 
             int nStart = adjStart[current];
             int nEnd = adjStart[current + 1];
@@ -897,7 +837,7 @@ class HoloGPSHandler : StaticEventHandler
                 Sector nextSec = level.sectors[neighbor];
 
                 double nextFloor;
-                if (IsPortalPassable(curSec, nextSec, ln, searchPlayer, sectorZ[current], nextFloor))
+                if (IsPortalPassable(curSec, nextSec, ln, player, sectorZ[current], nextFloor))
                 {
                     double dist = ln.isLinePortal() ? (nextSec.centerspot + ln.getPortalDisplacement() - curSec.centerspot).Length() : (nextSec.centerspot - curSec.centerspot).Length();
                     double tentativeG = gScore[current] + dist;
@@ -908,14 +848,7 @@ class HoloGPSHandler : StaticEventHandler
                         parent[neighbor] = current;
                         parentLine[neighbor] = adjLineIdx[ni];
                         gScore[neighbor] = tentativeG;
-
-                        double heuristic = 0;
-                        Sector targetSec = level.PointInSector(searchTargetPos);
-                        if (targetSec && nextSec.PortalGroup == targetSec.PortalGroup)
-                        {
-                            heuristic = (nextSec.centerspot - searchTargetPos).Length();
-                        }
-                        fScore[neighbor] = tentativeG + heuristic;
+                        fScore[neighbor] = tentativeG + (nextSec.centerspot - targetPos).Length();
                         // Propagate the calculated floor Z height to the neighbor sector
                         // so that subsequent traversals starting from the neighbor correctly reference this vertical tier.
                         sectorZ[neighbor] = nextFloor;
@@ -927,6 +860,7 @@ class HoloGPSHandler : StaticEventHandler
                         }
                         else
                         {
+                            // Decrease-key: sift up from current position
                             HeapSiftUp(heapPos[neighbor]);
                         }
                     }
@@ -934,47 +868,108 @@ class HoloGPSHandler : StaticEventHandler
             }
         }
 
-        if (openSet.Size() == 0) return 0;
-        return -1;
+        return 0;
     }
 
-    void InitReverseBFSAsync()
+    // Synchronous multi-stage pathfinding: A* direct → pedestal retry → reverse BFS → switch routing.
+    // This runs to completion on the same tick, ensuring path data is always valid before markers render.
+    void FindPathAStar(Actor player, Actor target)
     {
+        pathX.Clear();
+        pathY.Clear();
+
+        if (graphBuilt == 0 || !player || !target) return;
+
         int numSectors = level.sectors.Size();
+
+        Sector startSec = level.PointInSector(player.pos.xy);
+        Sector endSec = level.PointInSector(target.pos.xy);
+
+        if (!startSec || !endSec) return;
+
+        int startIdx = startSec.sectornum;
+        int endIdx = endSec.sectornum;
+        int realEndIdx = endIdx;
+
+        if (startIdx == realEndIdx)
+        {
+            pathX.Push(target.pos.x);
+            pathY.Push(target.pos.y);
+            return;
+        }
+
+        parent.Resize(numSectors);
+        parentLine.Resize(numSectors);
+        reachable.Resize(numSectors);
+        gScore.Resize(numSectors);
+        fScore.Resize(numSectors);
+        inOpenSet.Resize(numSectors);
+        sectorZ.Resize(numSectors);
+
+        Vector2 targetPos = target.pos.xy;
+        int found = RunAStar(startIdx, realEndIdx, targetPos, player);
+
+        // Adaptive Pedestal Retry Pass:
+        // If the target's sector is unreachable (e.g., on a raised pedestal), try routing
+        // to the nearest adjacent sector instead.
+        if (found == 0)
+        {
+            int alternativeEndIdx = -1;
+            double closestDist = SCORE_INFINITY;
+
+            for (int i = 0; i < level.lines.Size(); i++)
+            {
+                Line ln = level.lines[i];
+                if (!ln || !ln.frontsector || !ln.backsector) continue;
+
+                int fNum = ln.frontsector.sectornum;
+                int bNum = ln.backsector.sectornum;
+
+                if (fNum == endIdx && bNum != endIdx)
+                {
+                    Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
+                    double d = (mid - target.pos.xy).Length();
+                    if (d < closestDist) { closestDist = d; alternativeEndIdx = bNum; }
+                }
+                else if (bNum == endIdx && fNum != endIdx)
+                {
+                    Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
+                    double d = (mid - target.pos.xy).Length();
+                    if (d < closestDist) { closestDist = d; alternativeEndIdx = fNum; }
+                }
+            }
+
+            if (alternativeEndIdx != -1 && alternativeEndIdx != startIdx)
+            {
+                found = RunAStar(startIdx, alternativeEndIdx, targetPos, player);
+                if (found == 1) realEndIdx = alternativeEndIdx;
+            }
+        }
+
+        if (found == 1)
+        {
+            BuildPathFromParent(startIdx, realEndIdx, target);
+            return;
+        }
+
+        // Pass 3: Reverse topological fallback — find the barrier sector and route to its switch.
+        // Runs a reverse BFS from the target back toward the player's reachable zone.
+        // The first sector it hits that borders the reachable zone is the "barrier sector" (locked door/gate).
         visitedReverse.Resize(numSectors);
         for (int i = 0; i < numSectors; i++) visitedReverse[i] = 0;
 
         queueReverse.Clear();
-        visitedReverse[searchEndIdx] = 1;
-        queueReverse.Push(searchEndIdx);
+        visitedReverse[endIdx] = 1;
+        queueReverse.Push(endIdx);
 
-        searchQHeadReverse = 0;
-        searchBarrierSec = null;
-        searchBarrierFound = false;
-        searchBestSwitchSector = -1;
-        searchBestSwitchLine = null;
-        searchMinPathSteps = int.MAX;
-        searchLi = 0;
-    }
+        int qHeadReverse = 0;
+        Sector barrierSec = null;
+        bool barrierFound = false;
 
-    // Runs a reverse topological Breadth-First Search (BFS) starting from the unreachable target
-    // back toward the player's reachable zone.
-    // Why: To solve progression puzzles (e.g. door locked by a remote switch).
-    // How:
-    // - Pass 1: Traverses neighbors backward from the target. The first sector it hits that has an adjacent
-    //   neighbor in the player's reachable zone is identified as the "barrier sector" (the locked door/gate).
-    // - Pass 2: Scans all level linedefs for player-triggerable switches/walkovers that trigger the barrier sector's tags.
-    // - If a switch is located in a sector the player can currently reach, it selects the closest switch as the detour target,
-    //   guiding the player to unlock the progression path!
-    int ResumeReverseBFSAsync(int limit)
-    {
-        int iterations = 0;
-        
-        while (searchQHeadReverse < queueReverse.Size() && !searchBarrierFound && iterations < limit)
+        while (qHeadReverse < queueReverse.Size())
         {
-            iterations++;
-            int current = queueReverse[searchQHeadReverse];
-            searchQHeadReverse++;
+            int current = queueReverse[qHeadReverse];
+            qHeadReverse++;
 
             int nStart = adjStart[current];
             int nEnd = adjStart[current + 1];
@@ -984,8 +979,8 @@ class HoloGPSHandler : StaticEventHandler
 
                 if (reachable[neighbor] == 1)
                 {
-                    searchBarrierSec = level.sectors[current];
-                    searchBarrierFound = true;
+                    barrierSec = level.sectors[current];
+                    barrierFound = true;
                     break;
                 }
 
@@ -995,25 +990,19 @@ class HoloGPSHandler : StaticEventHandler
                     queueReverse.Push(neighbor);
                 }
             }
+            if (barrierFound) break;
         }
 
-        if (searchQHeadReverse >= queueReverse.Size() && !searchBarrierFound)
-        {
-            return 0;
-        }
+        if (!barrierFound || !barrierSec) return;
 
-        if (!searchBarrierFound)
-        {
-            return -1;
-        }
+        // Scan all linedefs for player-triggerable switches that target the barrier sector's tag.
+        int bestSwitchSector = -1;
+        Line bestSwitchLine = null;
+        int minPathSteps = int.MAX;
 
-        int numLines = level.lines.Size();
-        while (searchLi < numLines && iterations < limit)
+        for (int li = 0; li < level.lines.Size(); li++)
         {
-            iterations++;
-            Line ln = level.lines[searchLi];
-            searchLi++;
-
+            Line ln = level.lines[li];
             if (!ln || !IsPlayerTriggerable(ln)) continue;
 
             int targetTag = ln.args[0];
@@ -1024,7 +1013,7 @@ class HoloGPSHandler : StaticEventHandler
             int secNum;
             while ((secNum = it.Next()) >= 0)
             {
-                if (secNum == searchBarrierSec.sectornum)
+                if (secNum == barrierSec.sectornum)
                 {
                     hasTag = true;
                     break;
@@ -1046,178 +1035,30 @@ class HoloGPSHandler : StaticEventHandler
             {
                 int steps = 0;
                 int cur = switchSecIdx;
-                while (cur != searchStartIdx && parentLine[cur] >= 0)
+                while (cur != startIdx && parentLine[cur] >= 0)
                 {
                     steps++;
                     cur = parent[cur];
                 }
-                if (steps < searchMinPathSteps)
+                if (steps < minPathSteps)
                 {
-                    searchMinPathSteps = steps;
-                    searchBestSwitchSector = switchSecIdx;
-                    searchBestSwitchLine = ln;
+                    minPathSteps = steps;
+                    bestSwitchSector = switchSecIdx;
+                    bestSwitchLine = ln;
                 }
             }
         }
 
-        if (searchLi < numLines)
+        if (bestSwitchLine && bestSwitchSector != -1)
         {
-            return -1;
-        }
-
-        if (searchBestSwitchLine && searchBestSwitchSector != -1)
-        {
-            return 1;
-        }
-
-        return 0;
-    }
-
-    void StartAsyncSearch(Actor player, Actor target)
-    {
-        if (graphBuilt == 0 || !player || !target)
-        {
-            searchState = ASYNC_STATE_IDLE;
-            return;
-        }
-
-        int numSectors = level.sectors.Size();
-        Sector startSec = level.PointInSector(player.pos.xy);
-        Sector endSec = level.PointInSector(target.pos.xy);
-
-        if (!startSec || !endSec)
-        {
-            searchState = ASYNC_STATE_IDLE;
-            return;
-        }
-
-        int startIdx = startSec.sectornum;
-        int endIdx = endSec.sectornum;
-
-        if (startIdx == endIdx)
-        {
-            pathX.Clear();
-            pathY.Clear();
-            pathX.Push(target.pos.x);
-            pathY.Push(target.pos.y);
-            searchState = ASYNC_STATE_IDLE;
-            return;
-        }
-
-        parent.Resize(numSectors);
-        parentLine.Resize(numSectors);
-        reachable.Resize(numSectors);
-        gScore.Resize(numSectors);
-        fScore.Resize(numSectors);
-        inOpenSet.Resize(numSectors);
-        sectorZ.Resize(numSectors);
-
-        searchPlayer = player;
-        searchTarget = target;
-        searchTargetPos = target.pos.xy;
-        searchStartIdx = startIdx;
-        searchEndIdx = endIdx;
-        searchRealEndIdx = endIdx;
-        searchAlternativeEndIdx = -1;
-
-        InitAStarAsync(startIdx, endIdx, target.pos.xy, player);
-        searchState = ASYNC_STATE_ASTAR_DIRECT;
-    }
-
-    void TickAsyncSearch()
-    {
-        int limit = 150;
-        
-        if (searchState == ASYNC_STATE_ASTAR_DIRECT)
-        {
-            int res = ResumeAStarAsync(limit);
-            if (res == 1)
+            // Route to the switch: re-run A* to the switch sector for a clean path
+            found = RunAStar(startIdx, bestSwitchSector, targetPos, player);
+            if (found == 1)
             {
-                BuildPathFromParent(searchStartIdx, searchRealEndIdx, searchTarget);
-                searchState = ASYNC_STATE_IDLE;
-            }
-            else if (res == 0)
-            {
-                int altIdx = -1;
-                double closestDist = SCORE_INFINITY;
-
-                for (int i = 0; i < level.lines.Size(); i++)
-                {
-                    Line ln = level.lines[i];
-                    if (!ln || !ln.frontsector || !ln.backsector) continue;
-
-                    int fNum = ln.frontsector.sectornum;
-                    int bNum = ln.backsector.sectornum;
-
-                    if (fNum == searchEndIdx && bNum != searchEndIdx)
-                    {
-                        Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
-                        double d = (mid - searchTarget.pos.xy).Length();
-                        if (d < closestDist) { closestDist = d; altIdx = bNum; }
-                    }
-                    else if (bNum == searchEndIdx && fNum != searchEndIdx)
-                    {
-                        Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
-                        double d = (mid - searchTarget.pos.xy).Length();
-                        if (d < closestDist) { closestDist = d; altIdx = fNum; }
-                    }
-                }
-
-                if (altIdx != -1 && altIdx != searchStartIdx)
-                {
-                    searchAlternativeEndIdx = altIdx;
-                    InitAStarAsync(searchStartIdx, altIdx, searchTargetPos, searchPlayer);
-                    searchState = ASYNC_STATE_ASTAR_PEDESTAL;
-                }
-                else
-                {
-                    InitReverseBFSAsync();
-                    searchState = ASYNC_STATE_REVERSE_BFS;
-                }
-            }
-        }
-        else if (searchState == ASYNC_STATE_ASTAR_PEDESTAL)
-        {
-            int res = ResumeAStarAsync(limit);
-            if (res == 1)
-            {
-                searchRealEndIdx = searchAlternativeEndIdx;
-                BuildPathFromParent(searchStartIdx, searchRealEndIdx, searchTarget);
-                searchState = ASYNC_STATE_IDLE;
-            }
-            else if (res == 0)
-            {
-                InitReverseBFSAsync();
-                searchState = ASYNC_STATE_REVERSE_BFS;
-            }
-        }
-        else if (searchState == ASYNC_STATE_REVERSE_BFS)
-        {
-            int res = ResumeReverseBFSAsync(limit);
-            if (res == 1)
-            {
-                InitAStarAsync(searchStartIdx, searchBestSwitchSector, searchTargetPos, searchPlayer);
-                searchState = ASYNC_STATE_ASTAR_SWITCH;
-            }
-            else if (res == 0)
-            {
-                searchState = ASYNC_STATE_IDLE;
-            }
-        }
-        else if (searchState == ASYNC_STATE_ASTAR_SWITCH)
-        {
-            int res = ResumeAStarAsync(limit);
-            if (res == 1)
-            {
-                BuildPathFromParent(searchStartIdx, searchBestSwitchSector, null);
-                Vector2 switchMid = (searchBestSwitchLine.v1.p + searchBestSwitchLine.v2.p) / 2.0;
+                BuildPathFromParent(startIdx, bestSwitchSector, null);
+                Vector2 switchMid = (bestSwitchLine.v1.p + bestSwitchLine.v2.p) / 2.0;
                 pathX.Push(switchMid.x);
                 pathY.Push(switchMid.y);
-                searchState = ASYNC_STATE_IDLE;
-            }
-            else if (res == 0)
-            {
-                searchState = ASYNC_STATE_IDLE;
             }
         }
     }
