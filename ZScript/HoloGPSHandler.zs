@@ -1037,9 +1037,9 @@ class HoloGPSHandler : StaticEventHandler {
   // and step heights. Propagates vertical level (refZ) to calculate and output
   // nextFloor for the neighboring sector.
   bool IsPortalPassable(Sector curSec, Sector nextSec, Line ln, Actor player,
-                        double refZ, out double nextFloor) {
-    nextFloor = nextSec.floorplane.ZatPoint(
-        ln.v1.p); // Default fallback if checks fail early
+                        double refZ, out double nextFloor, out double nextCeil, bool isProven = false) {
+    nextFloor = nextSec.floorplane.ZatPoint(ln.v1.p); 
+    nextCeil = nextFloor + 128.0;
 
     if (!ln || !curSec || !nextSec)
       return false;
@@ -1089,10 +1089,17 @@ class HoloGPSHandler : StaticEventHandler {
         bool isScriptDoor = (ln.special == 80 || ln.special == 226);
 
         if (!isDirectUse && !isStandardDoor && !isScriptDoor) {
+          // If it's a remote door and it's currently closed, we cannot pass it
+          // even if we proved it earlier when it was open!
           return false;
         }
       }
     }
+
+    if (isProven) return true;
+
+    if (abs(nextFloor - curFloor) > cache_step_max)
+      return false;
 
     return true;
   }
@@ -1352,21 +1359,8 @@ class HoloGPSHandler : StaticEventHandler {
 
         double nextFloor;
         double nextCeil;
-        bool isPassable = false;
-        if (cache_learning_proven && adjProven[ni]) {
-          isPassable = true;
-          Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
-          Vector2 nextMidpoint = ln.isLinePortal()
-                                     ? midpoint + ln.getPortalDisplacement()
-                                     : midpoint;
-          GetEffectiveFloorCeil(nextSec, nextMidpoint, sectorZ[current],
-                                nextFloor, nextCeil);
-        } else {
-          isPassable = IsPortalPassable(curSec, nextSec, ln, player,
-                                        sectorZ[current], nextFloor);
-          // When IsPortalPassable returns true, it doesn't give us nextCeil, so we approximate
-          nextCeil = nextFloor + 128.0; 
-        }
+        bool isProven = (cache_learning_proven && adjProven[ni]);
+        bool isPassable = IsPortalPassable(curSec, nextSec, ln, player, sectorZ[current], nextFloor, nextCeil, isProven);
 
         if (isPassable) {
           double dist = ln.isLinePortal()
