@@ -406,8 +406,9 @@ class HoloGPSHandler : StaticEventHandler
                     Sector keySec = level.PointInSector(mapKey.pos.xy);
                     if (keySec)
                     {
+                        int snappedIdx = GetValidSnappedSector(keySec.sectornum, mapKey, plyr.mo);
                         keyCandidates.Push(mapKey);
-                        keySectors.Push(keySec.sectornum);
+                        keySectors.Push(snappedIdx);
                     }
                 }
             }
@@ -688,6 +689,126 @@ class HoloGPSHandler : StaticEventHandler
         return top;
     }
 
+    // Calculates the cost penalty for traversing a damaging sector.
+    double GetHazardPenalty(Sector sec, Actor player)
+    {
+        if (sec.damageamount <= 0) return 0.0;
+
+        // If the player has a Radiation Suit or Invulnerability, ignore the hazard penalty.
+        if (player && (player.FindInventory("PowerIronFeet") || player.FindInventory("PowerInvulnerable")))
+        {
+            return 0.0;
+        }
+
+        // Return a penalty proportional to the damage amount.
+        return 1000.0 + sec.damageamount * 50.0;
+    }
+
+    // Snaps an unreachable/isolated/pedestal target sector to the nearest passable neighboring sector.
+    int GetValidSnappedSector(int endIdx, Actor target, Actor player)
+    {
+        if (endIdx < 0 || endIdx >= level.sectors.Size()) return endIdx;
+
+        Sector endSec = level.sectors[endIdx];
+        if (!endSec) return endIdx;
+
+        // 1. Check if the target sector is passable on its own (has sufficient clearance for a player)
+        double refZ = target ? target.pos.z : endSec.floorplane.ZatPoint(endSec.centerspot);
+        double endFloor, endCeil;
+        GetEffectiveFloorCeil(endSec, endSec.centerspot, refZ, endFloor, endCeil);
+        double clearance = endCeil - endFloor;
+        
+        bool isTargetPassable = (clearance >= CLEARANCE_MIN);
+        if (!isTargetPassable && cache_wolfendoom_compat && clearance >= CLEARANCE_MIN_WOLF)
+        {
+            isTargetPassable = true;
+        }
+
+        // 2. Check if the target sector has any passable connections to its neighbors.
+        int nStart = adjStart[endIdx];
+        int nEnd = adjStart[endIdx + 1];
+        bool hasPassableConnection = false;
+        
+        for (int ni = nStart; ni < nEnd; ni++)
+        {
+            int neighbor = adjNeighbor[ni];
+            Sector nextSec = level.sectors[neighbor];
+            Line ln = level.lines[adjLineIdx[ni]];
+            double nextFloor;
+            if (IsPortalPassable(endSec, nextSec, ln, player, refZ, nextFloor))
+            {
+                hasPassableConnection = true;
+                break;
+            }
+        }
+
+        // If it's passable and not isolated, keep it as is.
+        if (isTargetPassable && hasPassableConnection)
+        {
+            return endIdx;
+        }
+
+        // 3. Otherwise, it's a pedestal/isolated sector. Find the best neighbor to snap to.
+        int bestNeighbor = -1;
+        double closestDist = SCORE_INFINITY;
+        Vector2 targetPos = target ? target.pos.xy : endSec.centerspot;
+
+        for (int ni = nStart; ni < nEnd; ni++)
+        {
+            int neighbor = adjNeighbor[ni];
+            Sector nextSec = level.sectors[neighbor];
+            Line ln = level.lines[adjLineIdx[ni]];
+
+            // Calculate the midpoint of the border line to measure distance
+            Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
+            double dist = (mid - targetPos).Length();
+
+            if (dist < closestDist)
+            {
+                // Verify the neighbor itself is passable
+                double neighborFloor, neighborCeil;
+                double neighborRefZ = nextSec.floorplane.ZatPoint(mid);
+                GetEffectiveFloorCeil(nextSec, mid, neighborRefZ, neighborFloor, neighborCeil);
+                double neighborClearance = neighborCeil - neighborFloor;
+                
+                if (neighborClearance >= CLEARANCE_MIN || (cache_wolfendoom_compat && neighborClearance >= CLEARANCE_MIN_WOLF))
+                {
+                    // Ensure the neighbor has at least one passable connection to its own neighbors (other than endIdx)
+                    int nnStart = adjStart[neighbor];
+                    int nnEnd = adjStart[neighbor + 1];
+                    bool neighborIsConnected = false;
+                    for (int nni = nnStart; nni < nnEnd; nni++)
+                    {
+                        int nnNeighbor = adjNeighbor[nni];
+                        if (nnNeighbor == endIdx) continue;
+                        
+                        Sector nnSec = level.sectors[nnNeighbor];
+                        Line nnLn = level.lines[adjLineIdx[nni]];
+                        double nnFloor;
+                        if (IsPortalPassable(nextSec, nnSec, nnLn, player, neighborFloor, nnFloor))
+                        {
+                            neighborIsConnected = true;
+                            break;
+                        }
+                    }
+
+                    if (neighborIsConnected)
+                    {
+                        closestDist = dist;
+                        bestNeighbor = neighbor;
+                    }
+                }
+            }
+        }
+
+        if (bestNeighbor != -1)
+        {
+            return bestNeighbor;
+        }
+
+        return endIdx; // Fallback to original if no valid neighbor found
+    }
+
     // Multi-goal Dijkstra core. Returns the index of the first goal sector reached, or -1.
     int RunAStarMultiGoal(int startIdx, in out Array<bool> isGoal, Vector2 targetPos, Actor player)
     {
@@ -734,7 +855,7 @@ class HoloGPSHandler : StaticEventHandler
                 if (IsPortalPassable(curSec, nextSec, ln, player, sectorZ[current], nextFloor))
                 {
                     double dist = ln.isLinePortal() ? (nextSec.centerspot + ln.getPortalDisplacement() - curSec.centerspot).Length() : (nextSec.centerspot - curSec.centerspot).Length();
-                    double tentativeG = gScore[current] + dist;
+                    double tentativeG = gScore[current] + dist + GetHazardPenalty(nextSec, player);
 
                     if (tentativeG < gScore[neighbor])
                     {
@@ -840,7 +961,7 @@ class HoloGPSHandler : StaticEventHandler
                 if (IsPortalPassable(curSec, nextSec, ln, player, sectorZ[current], nextFloor))
                 {
                     double dist = ln.isLinePortal() ? (nextSec.centerspot + ln.getPortalDisplacement() - curSec.centerspot).Length() : (nextSec.centerspot - curSec.centerspot).Length();
-                    double tentativeG = gScore[current] + dist;
+                    double tentativeG = gScore[current] + dist + GetHazardPenalty(nextSec, player);
 
                     if (tentativeG < gScore[neighbor])
                     {
@@ -889,7 +1010,7 @@ class HoloGPSHandler : StaticEventHandler
 
         int startIdx = startSec.sectornum;
         int endIdx = endSec.sectornum;
-        int realEndIdx = endIdx;
+        int realEndIdx = GetValidSnappedSector(endIdx, target, player);
 
         if (startIdx == realEndIdx)
         {
@@ -908,43 +1029,6 @@ class HoloGPSHandler : StaticEventHandler
 
         Vector2 targetPos = target.pos.xy;
         int found = RunAStar(startIdx, realEndIdx, targetPos, player);
-
-        // Adaptive Pedestal Retry Pass:
-        // If the target's sector is unreachable (e.g., on a raised pedestal), try routing
-        // to the nearest adjacent sector instead.
-        if (found == 0)
-        {
-            int alternativeEndIdx = -1;
-            double closestDist = SCORE_INFINITY;
-
-            for (int i = 0; i < level.lines.Size(); i++)
-            {
-                Line ln = level.lines[i];
-                if (!ln || !ln.frontsector || !ln.backsector) continue;
-
-                int fNum = ln.frontsector.sectornum;
-                int bNum = ln.backsector.sectornum;
-
-                if (fNum == endIdx && bNum != endIdx)
-                {
-                    Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
-                    double d = (mid - target.pos.xy).Length();
-                    if (d < closestDist) { closestDist = d; alternativeEndIdx = bNum; }
-                }
-                else if (bNum == endIdx && fNum != endIdx)
-                {
-                    Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
-                    double d = (mid - target.pos.xy).Length();
-                    if (d < closestDist) { closestDist = d; alternativeEndIdx = fNum; }
-                }
-            }
-
-            if (alternativeEndIdx != -1 && alternativeEndIdx != startIdx)
-            {
-                found = RunAStar(startIdx, alternativeEndIdx, targetPos, player);
-                if (found == 1) realEndIdx = alternativeEndIdx;
-            }
-        }
 
         if (found == 1)
         {
@@ -1175,6 +1259,32 @@ class HoloGPSHandler : StaticEventHandler
         }
     }
 
+    // Attempts to find a safe, walkable position near a candidate detour point by nudging
+    // outward from the wall to avoid landing inside geometry or low-clearance areas.
+    Vector2 GetSafeDetourPoint(Vector2 candidate, Vector2 perp, double refZ)
+    {
+        double stepSize = 12.0;
+        int maxAttempts = 3;
+
+        for (int i = 0; i <= maxAttempts; i++)
+        {
+            Vector2 testPt = candidate + perp * (i * stepSize);
+            Sector sec = level.PointInSector(testPt);
+            if (!sec) continue;
+
+            double floorZ, ceilZ;
+            GetEffectiveFloorCeil(sec, testPt, refZ, floorZ, ceilZ);
+            
+            // Check clearance and step height relative to our reference height
+            if (ceilZ - floorZ >= CLEARANCE_MIN && abs(floorZ - refZ) <= STEP_HEIGHT_MAX)
+            {
+                return testPt;
+            }
+        }
+
+        return candidate; // Fallback
+    }
+
     // Calculates a physical detour around a blocking wall or corner between two points A and B.
     // Why: A* outputs topological waypoints (midpoints of portals/lines), which can result in lines
     //      clipping corners of walls or pillars.
@@ -1217,7 +1327,10 @@ class HoloGPSHandler : StaticEventHandler
         }
 
         Vector2 d1 = hitLn.v1.p - lnDir * DETOUR_WALL_MARGIN + perp * DETOUR_PERP_MARGIN;
+        d1 = GetSafeDetourPoint(d1, perp, floorzA);
+
         Vector2 d2 = hitLn.v2.p + lnDir * DETOUR_WALL_MARGIN + perp * DETOUR_PERP_MARGIN;
+        d2 = GetSafeDetourPoint(d2, perp, floorzA);
 
         Array<double> path1X;
         Array<double> path1Y;
