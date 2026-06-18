@@ -70,6 +70,30 @@ class HoloGPSHandler : StaticEventHandler
     int lastTargetSectorIdx;
     Array<Actor> activeMarkers;
 
+    const ASYNC_STATE_IDLE = 0;
+    const ASYNC_STATE_ASTAR_DIRECT = 1;
+    const ASYNC_STATE_ASTAR_PEDESTAL = 2;
+    const ASYNC_STATE_REVERSE_BFS = 3;
+    const ASYNC_STATE_ASTAR_SWITCH = 4;
+
+    int searchState;
+    int searchStartIdx;
+    int searchEndIdx;
+    int searchRealEndIdx;
+    int searchAlternativeEndIdx;
+    Vector2 searchTargetPos;
+    Actor searchPlayer;
+    Actor searchTarget;
+
+    // For reverse BFS (Phase 3)
+    int searchQHeadReverse;
+    Sector searchBarrierSec;
+    bool searchBarrierFound;
+    int searchBestSwitchSector;
+    Line searchBestSwitchLine;
+    int searchMinPathSteps;
+    int searchLi;
+
     // Consolidated reusable tracer instance to avoid garbage collector load
     PathfinderTracer mTracer;
 
@@ -146,6 +170,7 @@ class HoloGPSHandler : StaticEventHandler
         refinedX.Clear();
         refinedY.Clear();
         graphBuilt = 0;
+        searchState = ASYNC_STATE_IDLE;
         
         mTracer = new("PathfinderTracer");
 
@@ -313,11 +338,16 @@ class HoloGPSHandler : StaticEventHandler
             {
                 if (!pathFresh)
                 {
-                    FindPathAStar(plyr.mo, currentTarget);
+                    StartAsyncSearch(plyr.mo, currentTarget);
                 }
                 lastTarget = currentTarget;
                 lastPlayerSectorIdx = pIdx;
                 lastTargetSectorIdx = tIdx;
+            }
+
+            if (searchState != ASYNC_STATE_IDLE)
+            {
+                TickAsyncSearch();
             }
 
             pathFresh = false;
@@ -340,6 +370,7 @@ class HoloGPSHandler : StaticEventHandler
 
     void FindNextObjective()
     {
+        searchState = ASYNC_STATE_IDLE;
         PlayerInfo plyr = players[consoleplayer];
         if (!plyr || !plyr.mo) return;
 
@@ -445,6 +476,8 @@ class HoloGPSHandler : StaticEventHandler
         if (cache_priority == 0 || cache_priority == 2)
         {
             Array<Actor> exitSpots;
+            Array<int> exitSectors;
+
             for (int i = 0; i < level.lines.Size(); i++)
             {
                 Line ln = level.lines[i];
@@ -466,20 +499,49 @@ class HoloGPSHandler : StaticEventHandler
 
                     double z = exitSec.floorplane.ZatPoint(midpoint);
                     Actor spot = Actor.Spawn("MapSpot", (midpoint.x, midpoint.y, z));
-                    if (spot) exitSpots.Push(spot);
+                    if (spot)
+                    {
+                        exitSpots.Push(spot);
+                        exitSectors.Push(exitSec.sectornum);
+                    }
                 }
             }
 
             int foundIdx = -1;
-            for (int i = 0; i < exitSpots.Size(); i++)
+            if (exitSpots.Size() > 0)
             {
-                FindPathAStar(plyr.mo, exitSpots[i]);
-                if (pathX.Size() > 0)
+                Sector startSec = level.PointInSector(plyr.mo.pos.xy);
+                if (startSec)
                 {
-                    currentTarget = exitSpots[i];
-                    pathFresh = true;
-                    foundIdx = i;
-                    break;
+                    int startIdx = startSec.sectornum;
+                    int numSectors = level.sectors.Size();
+                    parent.Resize(numSectors);
+                    parentLine.Resize(numSectors);
+                    reachable.Resize(numSectors);
+                    gScore.Resize(numSectors);
+                    fScore.Resize(numSectors);
+                    inOpenSet.Resize(numSectors);
+
+                    Array<bool> isGoal;
+                    isGoal.Resize(numSectors);
+                    for (int i = 0; i < numSectors; i++) isGoal[i] = false;
+                    for (int i = 0; i < exitSectors.Size(); i++) isGoal[exitSectors[i]] = true;
+
+                    int hitGoal = RunAStarMultiGoal(startIdx, isGoal, plyr.mo.pos.xy, plyr.mo);
+                    if (hitGoal >= 0)
+                    {
+                        for (int i = 0; i < exitSpots.Size(); i++)
+                        {
+                            if (exitSectors[i] == hitGoal)
+                            {
+                                currentTarget = exitSpots[i];
+                                BuildPathFromParent(startIdx, hitGoal, exitSpots[i]);
+                                pathFresh = true;
+                                foundIdx = i;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -791,115 +853,113 @@ class HoloGPSHandler : StaticEventHandler
         }
     }
 
-    void FindPathAStar(Actor player, Actor target)
+    void InitAStarAsync(int startIdx, int goalIdx, Vector2 targetPos, Actor player)
     {
-        pathX.Clear();
-        pathY.Clear();
-
-        if (graphBuilt == 0 || !player || !target) return;
-
         int numSectors = level.sectors.Size();
+        openSet.Clear();
+        heapPos.Resize(numSectors);
 
-        Sector startSec = level.PointInSector(player.pos.xy);
-        Sector endSec = level.PointInSector(target.pos.xy);
-
-        if (!startSec || !endSec) return;
-
-        int startIdx = startSec.sectornum;
-        int endIdx = endSec.sectornum;
-        int realEndIdx = endIdx;
-
-        if (startIdx == realEndIdx)
+        for (int i = 0; i < numSectors; i++)
         {
-            pathX.Push(target.pos.x);
-            pathY.Push(target.pos.y);
-            return;
+            parent[i] = -1;
+            parentLine[i] = -1;
+            reachable[i] = 0;
+            gScore[i] = SCORE_INFINITY;
+            fScore[i] = SCORE_INFINITY;
+            inOpenSet[i] = false;
+            heapPos[i] = -1;
         }
 
-        parent.Resize(numSectors);
-        parentLine.Resize(numSectors);
-        reachable.Resize(numSectors);
-        gScore.Resize(numSectors);
-        fScore.Resize(numSectors);
-        inOpenSet.Resize(numSectors);
+        gScore[startIdx] = 0.0;
+        fScore[startIdx] = (level.sectors[startIdx].centerspot - targetPos).Length();
+        reachable[startIdx] = 1;
+        inOpenSet[startIdx] = true;
+        HeapPush(startIdx);
 
-        Vector2 targetPos = target.pos.xy;
-        int found = RunAStar(startIdx, realEndIdx, targetPos, player);
+        searchStartIdx = startIdx;
+        searchEndIdx = goalIdx;
+        searchTargetPos = targetPos;
+        searchPlayer = player;
+    }
 
-        // Adaptive Pedestal Retry Pass
-        if (found == 0)
+    int ResumeAStarAsync(int limit)
+    {
+        int iterations = 0;
+        while (openSet.Size() > 0 && iterations < limit)
         {
-            int alternativeEndIdx = -1;
-            double closestDist = SCORE_INFINITY;
+            iterations++;
+            int current = HeapPop();
+            inOpenSet[current] = false;
+            if (current == searchEndIdx) return 1;
 
-            for (int i = 0; i < level.lines.Size(); i++)
+            int nStart = adjStart[current];
+            int nEnd = adjStart[current + 1];
+            for (int ni = nStart; ni < nEnd; ni++)
             {
-                Line ln = level.lines[i];
-                if (!ln || !ln.frontsector || !ln.backsector) continue;
+                int neighbor = adjNeighbor[ni];
+                Line ln = level.lines[adjLineIdx[ni]];
+                Sector curSec = level.sectors[current];
+                Sector nextSec = level.sectors[neighbor];
 
-                int fNum = ln.frontsector.sectornum;
-                int bNum = ln.backsector.sectornum;
-
-                if (fNum == endIdx && bNum != endIdx)
+                if (IsPortalPassable(curSec, nextSec, ln, searchPlayer))
                 {
-                    Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
-                    double d = (mid - target.pos.xy).Length();
-                    if (d < closestDist) { closestDist = d; alternativeEndIdx = bNum; }
-                }
-                else if (bNum == endIdx && fNum != endIdx)
-                {
-                    Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
-                    double d = (mid - target.pos.xy).Length();
-                    if (d < closestDist) { closestDist = d; alternativeEndIdx = fNum; }
-                }
-            }
+                    double dist = (nextSec.centerspot - curSec.centerspot).Length();
+                    double tentativeG = gScore[current] + dist;
 
-            if (alternativeEndIdx != -1 && alternativeEndIdx != startIdx)
-            {
-                found = RunAStar(startIdx, alternativeEndIdx, targetPos, player);
-                if (found == 1) realEndIdx = alternativeEndIdx;
+                    if (tentativeG < gScore[neighbor])
+                    {
+                        reachable[neighbor] = 1;
+                        parent[neighbor] = current;
+                        parentLine[neighbor] = adjLineIdx[ni];
+                        gScore[neighbor] = tentativeG;
+                        fScore[neighbor] = tentativeG + (nextSec.centerspot - searchTargetPos).Length();
+
+                        if (!inOpenSet[neighbor])
+                        {
+                            inOpenSet[neighbor] = true;
+                            HeapPush(neighbor);
+                        }
+                        else
+                        {
+                            HeapSiftUp(heapPos[neighbor]);
+                        }
+                    }
+                }
             }
         }
 
-        if (found == 1)
-        {
-            Array<int> reversedLines;
-            int cur = realEndIdx;
-            while (cur != startIdx && parentLine[cur] >= 0)
-            {
-                reversedLines.Push(parentLine[cur]);
-                cur = parent[cur];
-            }
+        if (openSet.Size() == 0) return 0;
+        return -1;
+    }
 
-            for (int i = reversedLines.Size() - 1; i >= 0; i--)
-            {
-                Line ln = level.lines[reversedLines[i]];
-                Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
-                pathX.Push(mid.x);
-                pathY.Push(mid.y);
-            }
-
-            pathX.Push(target.pos.x);
-            pathY.Push(target.pos.y);
-            return;
-        }
-
-        // Pass 3: Reverse topological fallback finding the barrier sector
+    void InitReverseBFSAsync()
+    {
+        int numSectors = level.sectors.Size();
         visitedReverse.Resize(numSectors);
         for (int i = 0; i < numSectors; i++) visitedReverse[i] = 0;
 
         queueReverse.Clear();
-        visitedReverse[endIdx] = 1;
-        queueReverse.Push(endIdx);
+        visitedReverse[searchEndIdx] = 1;
+        queueReverse.Push(searchEndIdx);
 
-        int qHeadReverse = 0;
-        Sector barrierSec = null;
-        bool barrierFound = false;
+        searchQHeadReverse = 0;
+        searchBarrierSec = null;
+        searchBarrierFound = false;
+        searchBestSwitchSector = -1;
+        searchBestSwitchLine = null;
+        searchMinPathSteps = int.MAX;
+        searchLi = 0;
+    }
 
-        while (qHeadReverse < queueReverse.Size())
+    int ResumeReverseBFSAsync(int limit)
+    {
+        int iterations = 0;
+        
+        while (searchQHeadReverse < queueReverse.Size() && !searchBarrierFound && iterations < limit)
         {
-            int current = queueReverse[qHeadReverse];
-            qHeadReverse++;
+            iterations++;
+            int current = queueReverse[searchQHeadReverse];
+            searchQHeadReverse++;
 
             int nStart = adjStart[current];
             int nEnd = adjStart[current + 1];
@@ -909,8 +969,8 @@ class HoloGPSHandler : StaticEventHandler
 
                 if (reachable[neighbor] == 1)
                 {
-                    barrierSec = level.sectors[current];
-                    barrierFound = true;
+                    searchBarrierSec = level.sectors[current];
+                    searchBarrierFound = true;
                     break;
                 }
 
@@ -920,18 +980,25 @@ class HoloGPSHandler : StaticEventHandler
                     queueReverse.Push(neighbor);
                 }
             }
-            if (barrierFound) break;
         }
 
-        if (!barrierFound || !barrierSec) return;
-
-        int bestSwitchSector = -1;
-        Line bestSwitchLine = null;
-        int minPathSteps = int.MAX;
-
-        for (int li = 0; li < level.lines.Size(); li++)
+        if (searchQHeadReverse >= queueReverse.Size() && !searchBarrierFound)
         {
-            Line ln = level.lines[li];
+            return 0;
+        }
+
+        if (!searchBarrierFound)
+        {
+            return -1;
+        }
+
+        int numLines = level.lines.Size();
+        while (searchLi < numLines && iterations < limit)
+        {
+            iterations++;
+            Line ln = level.lines[searchLi];
+            searchLi++;
+
             if (!ln || !IsPlayerTriggerable(ln)) continue;
 
             int targetTag = ln.args[0];
@@ -942,7 +1009,7 @@ class HoloGPSHandler : StaticEventHandler
             int secNum;
             while ((secNum = it.Next()) >= 0)
             {
-                if (secNum == barrierSec.sectornum)
+                if (secNum == searchBarrierSec.sectornum)
                 {
                     hasTag = true;
                     break;
@@ -964,41 +1031,178 @@ class HoloGPSHandler : StaticEventHandler
             {
                 int steps = 0;
                 int cur = switchSecIdx;
-                while (cur != startIdx && parentLine[cur] >= 0)
+                while (cur != searchStartIdx && parentLine[cur] >= 0)
                 {
                     steps++;
                     cur = parent[cur];
                 }
-                if (steps < minPathSteps)
+                if (steps < searchMinPathSteps)
                 {
-                    minPathSteps = steps;
-                    bestSwitchSector = switchSecIdx;
-                    bestSwitchLine = ln;
+                    searchMinPathSteps = steps;
+                    searchBestSwitchSector = switchSecIdx;
+                    searchBestSwitchLine = ln;
                 }
             }
         }
 
-        if (bestSwitchLine && bestSwitchSector != -1)
+        if (searchLi < numLines)
         {
-            Array<int> reversedLines;
-            int cur = bestSwitchSector;
-            while (cur != startIdx && parentLine[cur] >= 0)
-            {
-                reversedLines.Push(parentLine[cur]);
-                cur = parent[cur];
-            }
+            return -1;
+        }
 
-            for (int i = reversedLines.Size() - 1; i >= 0; i--)
-            {
-                Line ln = level.lines[reversedLines[i]];
-                Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
-                pathX.Push(mid.x);
-                pathY.Push(mid.y);
-            }
+        if (searchBestSwitchLine && searchBestSwitchSector != -1)
+        {
+            return 1;
+        }
 
-            Vector2 switchMid = (bestSwitchLine.v1.p + bestSwitchLine.v2.p) / 2.0;
-            pathX.Push(switchMid.x);
-            pathY.Push(switchMid.y);
+        return 0;
+    }
+
+    void StartAsyncSearch(Actor player, Actor target)
+    {
+        if (graphBuilt == 0 || !player || !target)
+        {
+            searchState = ASYNC_STATE_IDLE;
+            return;
+        }
+
+        int numSectors = level.sectors.Size();
+        Sector startSec = level.PointInSector(player.pos.xy);
+        Sector endSec = level.PointInSector(target.pos.xy);
+
+        if (!startSec || !endSec)
+        {
+            searchState = ASYNC_STATE_IDLE;
+            return;
+        }
+
+        int startIdx = startSec.sectornum;
+        int endIdx = endSec.sectornum;
+
+        if (startIdx == endIdx)
+        {
+            pathX.Clear();
+            pathY.Clear();
+            pathX.Push(target.pos.x);
+            pathY.Push(target.pos.y);
+            searchState = ASYNC_STATE_IDLE;
+            return;
+        }
+
+        parent.Resize(numSectors);
+        parentLine.Resize(numSectors);
+        reachable.Resize(numSectors);
+        gScore.Resize(numSectors);
+        fScore.Resize(numSectors);
+        inOpenSet.Resize(numSectors);
+
+        searchPlayer = player;
+        searchTarget = target;
+        searchTargetPos = target.pos.xy;
+        searchStartIdx = startIdx;
+        searchEndIdx = endIdx;
+        searchRealEndIdx = endIdx;
+        searchAlternativeEndIdx = -1;
+
+        InitAStarAsync(startIdx, endIdx, target.pos.xy, player);
+        searchState = ASYNC_STATE_ASTAR_DIRECT;
+    }
+
+    void TickAsyncSearch()
+    {
+        int limit = 150;
+        
+        if (searchState == ASYNC_STATE_ASTAR_DIRECT)
+        {
+            int res = ResumeAStarAsync(limit);
+            if (res == 1)
+            {
+                BuildPathFromParent(searchStartIdx, searchRealEndIdx, searchTarget);
+                searchState = ASYNC_STATE_IDLE;
+            }
+            else if (res == 0)
+            {
+                int altIdx = -1;
+                double closestDist = SCORE_INFINITY;
+
+                for (int i = 0; i < level.lines.Size(); i++)
+                {
+                    Line ln = level.lines[i];
+                    if (!ln || !ln.frontsector || !ln.backsector) continue;
+
+                    int fNum = ln.frontsector.sectornum;
+                    int bNum = ln.backsector.sectornum;
+
+                    if (fNum == searchEndIdx && bNum != searchEndIdx)
+                    {
+                        Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
+                        double d = (mid - searchTarget.pos.xy).Length();
+                        if (d < closestDist) { closestDist = d; altIdx = bNum; }
+                    }
+                    else if (bNum == searchEndIdx && fNum != searchEndIdx)
+                    {
+                        Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
+                        double d = (mid - searchTarget.pos.xy).Length();
+                        if (d < closestDist) { closestDist = d; altIdx = fNum; }
+                    }
+                }
+
+                if (altIdx != -1 && altIdx != searchStartIdx)
+                {
+                    searchAlternativeEndIdx = altIdx;
+                    InitAStarAsync(searchStartIdx, altIdx, searchTargetPos, searchPlayer);
+                    searchState = ASYNC_STATE_ASTAR_PEDESTAL;
+                }
+                else
+                {
+                    InitReverseBFSAsync();
+                    searchState = ASYNC_STATE_REVERSE_BFS;
+                }
+            }
+        }
+        else if (searchState == ASYNC_STATE_ASTAR_PEDESTAL)
+        {
+            int res = ResumeAStarAsync(limit);
+            if (res == 1)
+            {
+                searchRealEndIdx = searchAlternativeEndIdx;
+                BuildPathFromParent(searchStartIdx, searchRealEndIdx, searchTarget);
+                searchState = ASYNC_STATE_IDLE;
+            }
+            else if (res == 0)
+            {
+                InitReverseBFSAsync();
+                searchState = ASYNC_STATE_REVERSE_BFS;
+            }
+        }
+        else if (searchState == ASYNC_STATE_REVERSE_BFS)
+        {
+            int res = ResumeReverseBFSAsync(limit);
+            if (res == 1)
+            {
+                InitAStarAsync(searchStartIdx, searchBestSwitchSector, searchTargetPos, searchPlayer);
+                searchState = ASYNC_STATE_ASTAR_SWITCH;
+            }
+            else if (res == 0)
+            {
+                searchState = ASYNC_STATE_IDLE;
+            }
+        }
+        else if (searchState == ASYNC_STATE_ASTAR_SWITCH)
+        {
+            int res = ResumeAStarAsync(limit);
+            if (res == 1)
+            {
+                BuildPathFromParent(searchStartIdx, searchBestSwitchSector, null);
+                Vector2 switchMid = (searchBestSwitchLine.v1.p + searchBestSwitchLine.v2.p) / 2.0;
+                pathX.Push(switchMid.x);
+                pathY.Push(switchMid.y);
+                searchState = ASYNC_STATE_IDLE;
+            }
+            else if (res == 0)
+            {
+                searchState = ASYNC_STATE_IDLE;
+            }
         }
     }
 
