@@ -148,7 +148,7 @@ class HoloGPSHandler : StaticEventHandler {
   Array<HoloMapKnowledge> sessionKnowledge;
   
   string GetMapHash() {
-    return level.mapname .. "_" .. level.sectors.Size() .. "_" .. level.lines.Size();
+    return level.mapname.MakeLower() .. "_" .. level.sectors.Size() .. "_" .. level.lines.Size();
   }
 
   string lastMapName;
@@ -367,7 +367,10 @@ class HoloGPSHandler : StaticEventHandler {
 
     if (plyr) {
       CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyr);
-      if (cvBlob) DeserializeLearningData(cvBlob.GetString());
+      if (cvBlob) {
+        Console.Printf("HoloGPS Debug: Loaded CVAR string length is %d", cvBlob.GetString().Length());
+        DeserializeLearningData(cvBlob.GetString());
+      }
     }
 
     int numSectors = level.sectors.Size();
@@ -821,6 +824,13 @@ class HoloGPSHandler : StaticEventHandler {
       int estSize = GetEstimatedDatabaseSize();
       double estKB = estSize / 1024.0;
       Console.Printf("Holographic GPS: %d maps stored in memory database. Approx. %.2f KB saved.", sessionKnowledge.Size(), estKB);
+      PlayerInfo plyrInfo = players[consoleplayer];
+      if (plyrInfo) {
+        CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyrInfo);
+        if (cvBlob) {
+           Console.Printf("HoloGPS Debug: Current live CVAR length is %d", cvBlob.GetString().Length());
+        }
+      }
     }
   }
 
