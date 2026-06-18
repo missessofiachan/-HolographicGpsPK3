@@ -8,9 +8,31 @@ class PathfinderTracer : LineTracer
 
         if (Results.HitType == TRACE_CrossingPortal)
         {
-            if (Results.HitLine && (Results.HitLine.flags & Line.ML_BLOCKING))
+            if (Results.HitLine)
             {
-                return TRACE_Stop;
+                if (Results.HitLine.flags & Line.ML_BLOCKING) 
+                    return TRACE_Stop;
+
+                Sector front = Results.HitLine.frontsector;
+                Sector back = Results.HitLine.backsector;
+                if (front && back)
+                {
+                    Vector2 hitPt = Results.HitPos.xy;
+                    double fFloor = front.floorplane.ZatPoint(hitPt);
+                    double fCeil = front.ceilingplane.ZatPoint(hitPt);
+                    double bFloor = back.floorplane.ZatPoint(hitPt);
+                    double bCeil = back.ceilingplane.ZatPoint(hitPt);
+
+                    if ((fCeil - fFloor < 56.0) || (bCeil - bFloor < 56.0))
+                    {
+                        return TRACE_Stop;
+                    }
+
+                    if ((fFloor - bFloor > 24.0) || (bFloor - fFloor > 24.0))
+                    {
+                        return TRACE_Stop;
+                    }
+                }
             }
             return TRACE_Skip;
         }
@@ -66,7 +88,6 @@ class HoloGPSHandler : StaticEventHandler
             Line ln = level.lines[li];
             if (!ln.frontsector || !ln.backsector) continue;
             
-            // Ignore impassable lines
             if (ln.flags & Line.ML_BLOCKING) continue;
 
             int fi = ln.frontsector.sectornum;
@@ -179,62 +200,60 @@ class HoloGPSHandler : StaticEventHandler
         PlayerInfo plyr = players[consoleplayer];
         if (!plyr || !plyr.mo) return;
 
-        Array<Actor> potentialTargets;
-
-        // Priority 1: Find all keys the player doesn't have
+        // 1. First Pass: Look for any valid, REACHABLE keys
         ThinkerIterator it = ThinkerIterator.Create("Key");
         Key mapKey;
         while (mapKey = Key(it.Next()))
         {
             if (!mapKey.owner && !plyr.mo.FindInventory(mapKey.GetClass()))
             {
-                potentialTargets.Push(mapKey);
-            }
-        }
-
-        // Priority 2: Find exit line specials
-        if (potentialTargets.Size() == 0)
-        {
-            for (int i = 0; i < level.lines.Size(); i++)
-            {
-                Line ln = level.lines[i];
-                if (ln && (ln.special == 243 || ln.special == 244))
+                FindPathAStar(plyr.mo, mapKey);
+                if (pathX.Size() > 0)
                 {
-                    Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
-                    double z = level.PointInSector(midpoint).floorplane.ZatPoint(midpoint);
-                    Actor spot = Actor.Spawn("MapSpot", (midpoint.x, midpoint.y, z));
-                    if (spot) potentialTargets.Push(spot);
+                    currentTarget = mapKey;
+                    return;
                 }
             }
         }
 
-        // Find the first target that has a valid path
-        for (int i = 0; i < potentialTargets.Size(); i++)
+        // 2. Second Pass Fallback: If no keys are reachable, route directly to the exits
+        Array<Actor> exitSpots;
+        for (int i = 0; i < level.lines.Size(); i++)
         {
-            FindPathAStar(plyr.mo, potentialTargets[i]);
+            Line ln = level.lines[i];
+            if (ln && (ln.special == 243 || ln.special == 244 || ln.special == 74 || ln.special == 124))
+            {
+                Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
+                double z = level.PointInSector(midpoint).floorplane.ZatPoint(midpoint);
+                Actor spot = Actor.Spawn("MapSpot", (midpoint.x, midpoint.y, z));
+                if (spot) exitSpots.Push(spot);
+            }
+        }
+
+        for (int i = 0; i < exitSpots.Size(); i++)
+        {
+            FindPathAStar(plyr.mo, exitSpots[i]);
             if (pathX.Size() > 0)
             {
-                currentTarget = potentialTargets[i];
+                currentTarget = exitSpots[i];
                 
-                for (int j = 0; j < potentialTargets.Size(); j++)
+                // Destroy unused temporary exit spots
+                for (int j = 0; j < exitSpots.Size(); j++)
                 {
-                    if (i != j && potentialTargets[j] && potentialTargets[j].GetClassName() == "MapSpot")
+                    if (i != j && exitSpots[j])
                     {
-                        potentialTargets[j].Destroy();
+                        exitSpots[j].Destroy();
                     }
                 }
                 return;
             }
+            else
+            {
+                exitSpots[i].Destroy(); // Clean up if unreachable
+            }
         }
 
         currentTarget = null;
-        for (int i = 0; i < potentialTargets.Size(); i++)
-        {
-            if (potentialTargets[i] && potentialTargets[i].GetClassName() == "MapSpot")
-            {
-                potentialTargets[i].Destroy();
-            }
-        }
     }
 
     bool IsPortalPassable(Sector curSec, Sector nextSec, Line ln, Actor player)
@@ -261,14 +280,10 @@ class HoloGPSHandler : StaticEventHandler
         if (clearance < 56.0)
         {
             bool isDirectUse = (ln.activation & (SPAC_Use | SPAC_UseThrough)) != 0;
-            bool isDoorSpecial = false;
-            int spec = ln.special;
-            if (spec == 10 || spec == 11 || spec == 12 || spec == 13 || spec == 105 || spec == 106 || spec == 202)
-            {
-                isDoorSpecial = true;
-            }
+            bool isStandardDoor = (ln.special >= 10 && ln.special <= 13) || ln.special == 105 || ln.special == 106 || ln.special == 202;
+            bool isScriptDoor = (ln.special == 80 || ln.special == 226); // Expanded to support Wolf3D ACS doors
 
-            if (isDirectUse && isDoorSpecial)
+            if (isDirectUse || isStandardDoor || isScriptDoor)
             {
                 if (ln.locknumber != 0)
                 {
@@ -342,7 +357,7 @@ class HoloGPSHandler : StaticEventHandler
             parent[i] = -1;
             parentLine[i] = -1;
             reachable[i] = 0;
-            gScore[i] = 1e37; // Standard representation of infinity
+            gScore[i] = 1e37; 
             fScore[i] = 1e37;
             inOpenSet[i] = false;
         }
@@ -359,7 +374,6 @@ class HoloGPSHandler : StaticEventHandler
 
         while (openSet.Size() > 0)
         {
-            // Extract element with the lowest fScore
             int bestIdx = 0;
             double minF = fScore[openSet[0]];
             for (int i = 1; i < openSet.Size(); i++)
@@ -399,7 +413,7 @@ class HoloGPSHandler : StaticEventHandler
 
                     if (tentativeG < gScore[neighbor])
                     {
-                        reachable[neighbor] = 1; // Maintained for switch logic tracking fallback
+                        reachable[neighbor] = 1; 
                         parent[neighbor] = current;
                         parentLine[neighbor] = adjLineIdx[ni];
                         gScore[neighbor] = tentativeG;
@@ -780,8 +794,8 @@ class HoloGPSHandler : StaticEventHandler
 
                 if (PathIsBlocked(lastSpawnPos, spawnXY))
                 {
-                    spawnedCount = maxMarkers; 
-                    break;
+                    lastSpawnPos = spawnXY; 
+                    continue; 
                 }
 
                 double floorz = level.PointInSector(spawnXY).floorplane.ZatPoint(spawnXY);
