@@ -109,6 +109,7 @@ class HoloGPSHandler : StaticEventHandler
 
     // Sprite cache for WolfenDoom key compatibility checks
     SpriteID ykeySprite, bkeySprite, rkeySprite, gkeySprite, skeySprite;
+    SpriteID goldKeySprite, silvKeySprite;
     bool spritesCached;
 
     override void WorldLoaded(WorldEvent e)
@@ -129,6 +130,8 @@ class HoloGPSHandler : StaticEventHandler
         rkeySprite = Actor.GetSpriteIndex("RKEY");
         gkeySprite = Actor.GetSpriteIndex("GKEY");
         skeySprite = Actor.GetSpriteIndex("SKEY");
+        goldKeySprite = Actor.GetSpriteIndex("GOLD"); 
+        silvKeySprite = Actor.GetSpriteIndex("SILV"); 
         spritesCached = true;
 
         BuildAdjacencyGraph();
@@ -226,7 +229,6 @@ class HoloGPSHandler : StaticEventHandler
 
         InitCVars(plyr);
 
-        // Dynamic CVar lookup cache refresh (bypasses deep string hashing)
         cache_enabled = cv_enabled.GetBool();
         cache_freq = cv_freq.GetInt();
         cache_use_secrets = cv_use_secrets.GetBool();
@@ -325,7 +327,10 @@ class HoloGPSHandler : StaticEventHandler
 
                 if (!isKey && cache_wolfendoom_compat && mapKey.bSPECIAL)
                 {
-                    if (mapKey.sprite == ykeySprite || mapKey.sprite == bkeySprite || mapKey.sprite == rkeySprite || mapKey.sprite == gkeySprite || mapKey.sprite == skeySprite)
+                    if (mapKey.sprite == ykeySprite || mapKey.sprite == bkeySprite || 
+                        mapKey.sprite == rkeySprite || mapKey.sprite == gkeySprite || 
+                        mapKey.sprite == skeySprite || mapKey.sprite == goldKeySprite || 
+                        mapKey.sprite == silvKeySprite)
                     {
                         isKey = true;
                     }
@@ -353,6 +358,16 @@ class HoloGPSHandler : StaticEventHandler
                 if (ln && (ln.special == 243 || ln.special == 244 || ln.special == 74 || ln.special == 124))
                 {
                     Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
+
+                    // FIX: Push target 32 units away from the line into its front sector.
+                    // This prevents pathfinding into tight switch crevices and walls.
+                    if (ln.frontsector)
+                    {
+                        Vector2 lineVec = ln.v2.p - ln.v1.p;
+                        Vector2 normal = (lineVec.y, -lineVec.x).Unit(); // Right hand normal points to front sector
+                        midpoint = midpoint + normal * 32.0;
+                    }
+
                     Sector exitSec = level.PointInSector(midpoint);
                     if (!exitSec) continue; 
 
@@ -395,7 +410,6 @@ class HoloGPSHandler : StaticEventHandler
         if (ln.flags & Line.ML_BLOCKING) return false;
         if (!cache_use_secrets && (ln.flags & Line.ML_SECRET)) return false;
 
-        // FIX: Lock verification must execute globally for all lines, bypassing flat ceiling conversions
         if (ln.locknumber != 0)
         {
             PlayerPawn plyrPawn = PlayerPawn(player);
@@ -417,15 +431,23 @@ class HoloGPSHandler : StaticEventHandler
         double portalCeil = (curCeil < nextCeil) ? curCeil : nextCeil;
         double clearance = portalCeil - portalFloor;
 
+        // FIX: Lowered clearance check if WolfenDoom compat is enabled
         if (clearance < 56.0)
         {
-            bool isDirectUse = (ln.activation & (SPAC_Use | SPAC_UseThrough)) != 0;
-            bool isStandardDoor = (ln.special >= 10 && ln.special <= 13) || ln.special == 105 || ln.special == 106 || ln.special == 202;
-            bool isScriptDoor = (ln.special == 80 || ln.special == 226); 
-
-            if (!isDirectUse && !isStandardDoor && !isScriptDoor)
+            if (cache_wolfendoom_compat && clearance >= 40.0)
             {
-                return false;
+                // Pass for tight WolfenDoom elevator logic
+            }
+            else
+            {
+                bool isDirectUse = (ln.activation & (SPAC_Use | SPAC_UseThrough)) != 0;
+                bool isStandardDoor = (ln.special >= 10 && ln.special <= 13) || ln.special == 105 || ln.special == 106 || ln.special == 202;
+                bool isScriptDoor = (ln.special == 80 || ln.special == 226); 
+
+                if (!isDirectUse && !isStandardDoor && !isScriptDoor)
+                {
+                    return false;
+                }
             }
         }
 
@@ -1015,7 +1037,7 @@ class HoloGPSHandler : StaticEventHandler
                     int renderStyle = (cache_style == 1) ? STYLE_TranslucentStencil : STYLE_AddStencil;
                     int defaultStyle = (cache_style == 1) ? STYLE_Translucent : STYLE_Add;
 
-                    if (cache_color == 9) // Trans Pride
+                    if (cache_color == 9) 
                     {
                         int cycleStep = spawnedCount % 4;
                         color transCol = 0xFFFFFF; 
