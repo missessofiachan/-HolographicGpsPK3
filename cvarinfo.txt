@@ -14,3 +14,17 @@ user int    holo_gps_style = 0;           // 0=Additive, 1=Translucent
 user bool   holo_gps_extended_search = true; // Find custom non-standard keys
 user bool   holo_gps_wolfendoom_compat = false; // WolfenDoom compatibility mode
 
+// New Pathfinding & Adaptive Learning Settings
+user bool   holo_gps_hazard_avoidance = true;
+user bool   holo_gps_target_snapping = true;
+user bool   holo_gps_raycast_detouring = true;
+user bool   holo_gps_learning_proven = true;
+user bool   holo_gps_learning_pheromone = true;
+user bool   holo_gps_learning_persistent = true;
+
+// Core Pathfinder Features
+user bool   holo_gps_3dfloors = true;
+user bool   holo_gps_portals = true;
+user bool   holo_gps_solve_switches = true;
+user bool   holo_gps_smoothing = true;
+

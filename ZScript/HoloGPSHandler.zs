@@ -1,4 +1,11 @@
 
+// Represents the learned navigation data for a specific map to persist it across level changes.
+class HoloMapKnowledge : Object {
+  string mapName;
+  Array<bool> adjProven;
+  Array<double> sectorPheromone;
+}
+
 // HoloGPSHandler is a StaticEventHandler that coordinates the pathfinding and
 // marker projection logic. Design & Implementation Details:
 // - Adjacency Graph: Pre-built once per map load (`BuildAdjacencyGraph`) using
@@ -71,6 +78,16 @@ class HoloGPSHandler : StaticEventHandler {
   CVar cv_style;
   CVar cv_extended_search;
   CVar cv_wolfendoom_compat;
+  CVar cv_hazard_avoidance;
+  CVar cv_target_snapping;
+  CVar cv_raycast_detouring;
+  CVar cv_learning_proven;
+  CVar cv_learning_pheromone;
+  CVar cv_learning_persistent;
+  CVar cv_3dfloors;
+  CVar cv_portals;
+  CVar cv_solve_switches;
+  CVar cv_smoothing;
 
   // Dynamically cached CVars to bypass continuous string lookups
   bool cache_enabled;
@@ -87,10 +104,22 @@ class HoloGPSHandler : StaticEventHandler {
   int cache_style;
   bool cache_extended_search;
   bool cache_wolfendoom_compat;
+  bool cache_hazard_avoidance;
+  bool cache_target_snapping;
+  bool cache_raycast_detouring;
+  bool cache_learning_proven;
+  bool cache_learning_pheromone;
+  bool cache_learning_persistent;
+  bool cache_3dfloors;
+  bool cache_portals;
+  bool cache_solve_switches;
+  bool cache_smoothing;
 
   int lastPlayerSecIdx;
   Array<bool> adjProven;
   Array<double> sectorPheromone;
+  Array<HoloMapKnowledge> sessionKnowledge;
+  string lastMapName;
 
   // Persistent helper arrays to avoid garbage collector thrashing
   Array<int> parent;
@@ -128,6 +157,30 @@ class HoloGPSHandler : StaticEventHandler {
   bool spritesCached;
 
   override void WorldLoaded(WorldEvent e) {
+    PlayerInfo plyr = players[consoleplayer];
+    bool usePersistent = false;
+    if (plyr) {
+      CVar cv = CVar.GetCVar("holo_gps_learning_persistent", plyr);
+      if (cv) usePersistent = cv.GetBool();
+    }
+
+    if (usePersistent && lastMapName != "") {
+      HoloMapKnowledge saved = null;
+      for (int i = 0; i < sessionKnowledge.Size(); i++) {
+        if (sessionKnowledge[i].mapName == lastMapName) {
+          saved = sessionKnowledge[i];
+          break;
+        }
+      }
+      if (!saved) {
+        saved = new("HoloMapKnowledge");
+        saved.mapName = lastMapName;
+        sessionKnowledge.Push(saved);
+      }
+      saved.adjProven.Copy(adjProven);
+      saved.sectorPheromone.Copy(sectorPheromone);
+    }
+
     currentTarget = null;
     tickCounter = 0;
     activeMarkers.Clear();
@@ -137,12 +190,35 @@ class HoloGPSHandler : StaticEventHandler {
     refinedY.Clear();
     graphBuilt = 0;
 
+    BuildAdjacencyGraph();
+
+    string currentMap = level.MapName.MakeLower();
+    lastMapName = currentMap;
+
     int numSectors = level.sectors.Size();
     sectorPheromone.Clear();
     sectorPheromone.Resize(numSectors);
     for (int i = 0; i < numSectors; i++)
       sectorPheromone[i] = 0.0;
     lastPlayerSecIdx = -1;
+
+    if (usePersistent) {
+      HoloMapKnowledge loaded = null;
+      for (int i = 0; i < sessionKnowledge.Size(); i++) {
+        if (sessionKnowledge[i].mapName == currentMap) {
+          loaded = sessionKnowledge[i];
+          break;
+        }
+      }
+      if (loaded) {
+        if (loaded.sectorPheromone.Size() == sectorPheromone.Size()) {
+          sectorPheromone.Copy(loaded.sectorPheromone);
+        }
+        if (loaded.adjProven.Size() == adjProven.Size()) {
+          adjProven.Copy(loaded.adjProven);
+        }
+      }
+    } 
 
     mTracer = new("PathfinderTracer");
 
@@ -155,7 +231,6 @@ class HoloGPSHandler : StaticEventHandler {
     silvKeySprite = Actor.GetSpriteIndex("SILV");
     spritesCached = true;
 
-    BuildAdjacencyGraph();
     FindNextObjective();
   }
 
@@ -291,6 +366,16 @@ class HoloGPSHandler : StaticEventHandler {
     cv_style = CVar.GetCVar("holo_gps_style", plyr);
     cv_extended_search = CVar.GetCVar("holo_gps_extended_search", plyr);
     cv_wolfendoom_compat = CVar.GetCVar("holo_gps_wolfendoom_compat", plyr);
+    cv_hazard_avoidance = CVar.GetCVar("holo_gps_hazard_avoidance", plyr);
+    cv_target_snapping = CVar.GetCVar("holo_gps_target_snapping", plyr);
+    cv_raycast_detouring = CVar.GetCVar("holo_gps_raycast_detouring", plyr);
+    cv_learning_proven = CVar.GetCVar("holo_gps_learning_proven", plyr);
+    cv_learning_pheromone = CVar.GetCVar("holo_gps_learning_pheromone", plyr);
+    cv_learning_persistent = CVar.GetCVar("holo_gps_learning_persistent", plyr);
+    cv_3dfloors = CVar.GetCVar("holo_gps_3dfloors", plyr);
+    cv_portals = CVar.GetCVar("holo_gps_portals", plyr);
+    cv_solve_switches = CVar.GetCVar("holo_gps_solve_switches", plyr);
+    cv_smoothing = CVar.GetCVar("holo_gps_smoothing", plyr);
   }
 
   override void WorldTick() {
@@ -298,10 +383,15 @@ class HoloGPSHandler : StaticEventHandler {
     if (!plyr || !plyr.mo || plyr.mo.health <= 0)
       return;
 
+    InitCVars(plyr);
+    cache_learning_proven = cv_learning_proven.GetBool();
+    cache_learning_pheromone = cv_learning_pheromone.GetBool();
+    cache_learning_persistent = cv_learning_persistent.GetBool();
+
     Sector playerSec = level.PointInSector(plyr.mo.pos.xy);
     if (playerSec && graphBuilt == 1) {
       int playerSecIdx = playerSec.sectornum;
-      if (lastPlayerSecIdx != -1 && lastPlayerSecIdx != playerSecIdx) {
+      if (cache_learning_proven && lastPlayerSecIdx != -1 && lastPlayerSecIdx != playerSecIdx) {
         int nStart = adjStart[lastPlayerSecIdx];
         int nEnd = adjStart[lastPlayerSecIdx + 1];
         for (int ni = nStart; ni < nEnd; ni++) {
@@ -322,15 +412,13 @@ class HoloGPSHandler : StaticEventHandler {
       }
       lastPlayerSecIdx = playerSecIdx;
 
-      if (sectorPheromone.Size() > playerSecIdx) {
+      if (cache_learning_pheromone && sectorPheromone.Size() > playerSecIdx) {
         double newVal = sectorPheromone[playerSecIdx] + 0.01;
         if (newVal > 1.0)
           newVal = 1.0;
         sectorPheromone[playerSecIdx] = newVal;
       }
     }
-
-    InitCVars(plyr);
 
     cache_enabled = cv_enabled.GetBool();
     if (!cache_enabled)
@@ -356,6 +444,13 @@ class HoloGPSHandler : StaticEventHandler {
     cache_style = cv_style.GetInt();
     cache_extended_search = cv_extended_search.GetBool();
     cache_wolfendoom_compat = cv_wolfendoom_compat.GetBool();
+    cache_hazard_avoidance = cv_hazard_avoidance.GetBool();
+    cache_target_snapping = cv_target_snapping.GetBool();
+    cache_raycast_detouring = cv_raycast_detouring.GetBool();
+    cache_3dfloors = cv_3dfloors.GetBool();
+    cache_portals = cv_portals.GetBool();
+    cache_solve_switches = cv_solve_switches.GetBool();
+    cache_smoothing = cv_smoothing.GetBool();
 
     if (currentTarget) {
       if (currentTarget is "Inventory") {
@@ -378,7 +473,12 @@ class HoloGPSHandler : StaticEventHandler {
         FindPathAStar(plyr.mo, currentTarget);
       }
       pathFresh = false;
-      RefinePath(plyr.mo.pos.xy, plyr.mo.pos.z);
+      if (cache_smoothing) {
+        RefinePath(plyr.mo.pos.xy, plyr.mo.pos.z);
+      } else {
+        refinedX.Copy(pathX);
+        refinedY.Copy(pathY);
+      }
       SpawnPathMarkers(plyr.mo);
     }
   }
@@ -743,7 +843,7 @@ class HoloGPSHandler : StaticEventHandler {
 
   // Calculates the cost penalty for traversing a damaging sector.
   double GetHazardPenalty(Sector sec, Actor player) {
-    if (sec.damageamount <= 0)
+    if (!cache_hazard_avoidance || sec.damageamount <= 0)
       return 0.0;
 
     // If the player has a Radiation Suit or Invulnerability, ignore the hazard
@@ -902,12 +1002,14 @@ class HoloGPSHandler : StaticEventHandler {
       for (int ni = nStart; ni < nEnd; ni++) {
         int neighbor = adjNeighbor[ni];
         Line ln = level.lines[adjLineIdx[ni]];
+        if (!cache_portals && ln.isLinePortal())
+          continue;
         Sector curSec = level.sectors[current];
         Sector nextSec = level.sectors[neighbor];
 
         double nextFloor;
         bool isPassable = false;
-        if (adjProven[ni]) {
+        if (cache_learning_proven && adjProven[ni]) {
           isPassable = true;
           Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
           Vector2 nextMidpoint = ln.isLinePortal()
@@ -927,7 +1029,10 @@ class HoloGPSHandler : StaticEventHandler {
                                curSec.centerspot)
                                   .Length()
                             : (nextSec.centerspot - curSec.centerspot).Length();
-          double pDiscount = 1.0 - (sectorPheromone[neighbor] * 0.4);
+          double pDiscount = 1.0;
+          if (cache_learning_pheromone) {
+            pDiscount = 1.0 - (sectorPheromone[neighbor] * 0.4);
+          }
           double tentativeG = gScore[current] + dist * pDiscount +
                               GetHazardPenalty(nextSec, player);
 
@@ -1020,12 +1125,14 @@ class HoloGPSHandler : StaticEventHandler {
       for (int ni = nStart; ni < nEnd; ni++) {
         int neighbor = adjNeighbor[ni];
         Line ln = level.lines[adjLineIdx[ni]];
+        if (!cache_portals && ln.isLinePortal())
+          continue;
         Sector curSec = level.sectors[current];
         Sector nextSec = level.sectors[neighbor];
 
         double nextFloor;
         bool isPassable = false;
-        if (adjProven[ni]) {
+        if (cache_learning_proven && adjProven[ni]) {
           isPassable = true;
           Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
           Vector2 nextMidpoint = ln.isLinePortal()
@@ -1045,7 +1152,10 @@ class HoloGPSHandler : StaticEventHandler {
                                curSec.centerspot)
                                   .Length()
                             : (nextSec.centerspot - curSec.centerspot).Length();
-          double pDiscount = 1.0 - (sectorPheromone[neighbor] * 0.4);
+          double pDiscount = 1.0;
+          if (cache_learning_pheromone) {
+            pDiscount = 1.0 - (sectorPheromone[neighbor] * 0.4);
+          }
           double tentativeG = gScore[current] + dist * pDiscount +
                               GetHazardPenalty(nextSec, player);
 
@@ -1096,7 +1206,7 @@ class HoloGPSHandler : StaticEventHandler {
 
     int startIdx = startSec.sectornum;
     int endIdx = endSec.sectornum;
-    int realEndIdx = GetValidSnappedSector(endIdx, target, player);
+    int realEndIdx = cache_target_snapping ? GetValidSnappedSector(endIdx, target, player) : endIdx;
 
     if (startIdx == realEndIdx) {
       pathX.Push(target.pos.x);
@@ -1119,6 +1229,9 @@ class HoloGPSHandler : StaticEventHandler {
       BuildPathFromParent(startIdx, realEndIdx, target);
       return;
     }
+
+    if (!cache_solve_switches)
+      return;
 
     // Pass 3: Reverse topological fallback — find the barrier sector and route
     // to its switch. Runs a reverse BFS from the target back toward the
@@ -1236,6 +1349,14 @@ class HoloGPSHandler : StaticEventHandler {
                                                out double ceilZ) {
     floorZ = sec.floorplane.ZatPoint(pos);
     ceilZ = sec.ceilingplane.ZatPoint(pos);
+
+    PlayerInfo plyr = players[consoleplayer];
+    if (plyr) {
+      CVar cv = CVar.GetCVar("holo_gps_3dfloors", plyr);
+      if (cv && !cv.GetBool()) {
+        return;
+      }
+    }
 
     int count = sec.Get3DFloorCount();
     for (int i = 0; i < count; i++) {
@@ -1418,11 +1539,15 @@ class HoloGPSHandler : StaticEventHandler {
 
     Vector2 d1 =
         hitLn.v1.p - lnDir * DETOUR_WALL_MARGIN + perp * DETOUR_PERP_MARGIN;
-    d1 = GetSafeDetourPoint(d1, perp, floorzA);
+    if (cache_raycast_detouring) {
+      d1 = GetSafeDetourPoint(d1, perp, floorzA);
+    }
 
     Vector2 d2 =
         hitLn.v2.p + lnDir * DETOUR_WALL_MARGIN + perp * DETOUR_PERP_MARGIN;
-    d2 = GetSafeDetourPoint(d2, perp, floorzA);
+    if (cache_raycast_detouring) {
+      d2 = GetSafeDetourPoint(d2, perp, floorzA);
+    }
 
     Array<double> path1X;
     Array<double> path1Y;
