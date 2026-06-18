@@ -1,7 +1,7 @@
 
 // Represents the learned navigation data for a specific map to persist it across level changes.
 class HoloMapKnowledge : Object {
-  string mapName;
+  string mapHash;
   Array<bool> adjProven;
   Array<double> sectorPheromone;
 }
@@ -141,10 +141,16 @@ class HoloGPSHandler : StaticEventHandler {
   float cache_weight_monsters;
   float cache_weight_momentum;
 
+  bool learningDirty;
   int lastPlayerSecIdx;
   Array<bool> adjProven;
   Array<double> sectorPheromone;
   Array<HoloMapKnowledge> sessionKnowledge;
+  
+  string GetMapHash() {
+    return level.mapname .. "_" .. level.sectors.Size() .. "_" .. level.lines.Size();
+  }
+
   string lastMapName;
 
   // Global Heuristic Learning Data
@@ -200,6 +206,111 @@ class HoloGPSHandler : StaticEventHandler {
   SpriteID goldKeySprite, silvKeySprite;
   bool spritesCached;
 
+  
+  string SerializeLearningData() {
+    string outBlob = "G:"..avgBrightness..":"..brightnessSamples.."|";
+    string texStr = "";
+    for(int i = 0; i < knownTextures.Size(); i++) {
+       texStr = texStr .. knownTextures[i] .. ":" .. textureScores[i];
+       if (i < knownTextures.Size() - 1) texStr = texStr .. ",";
+    }
+    outBlob = outBlob .. texStr .. "|";
+    
+    PlayerInfo plyr = players[consoleplayer];
+    int limitVal = 10;
+    if (plyr) {
+      CVar limitCV = CVar.GetCVar("holo_gps_learning_limit", plyr);
+      if (limitCV) limitVal = limitCV.GetInt();
+    }
+    
+    int mapCount = 0;
+    for(int i = sessionKnowledge.Size() - 1; i >= 0 && mapCount < limitVal; i--) {
+       HoloMapKnowledge map = sessionKnowledge[i];
+       if (!map) continue;
+       outBlob = outBlob .. "M:" .. map.mapHash .. ":";
+       bool first = true;
+       for(int k = 0; k < map.adjProven.Size(); k++) {
+         if (map.adjProven[k]) {
+           if (!first) outBlob = outBlob .. ",";
+           outBlob = outBlob .. k;
+           first = false;
+         }
+       }
+       outBlob = outBlob .. "|";
+       mapCount++;
+    }
+    return outBlob;
+  }
+
+  void DeserializeLearningData(string blob) {
+    if (blob == "") return;
+    Array<string> parts;
+    blob.Split(parts, "|");
+    if (parts.Size() >= 2) {
+      Array<string> gStats;
+      parts[0].Split(gStats, ":");
+      if (gStats.Size() >= 3 && gStats[0] == "G") {
+        avgBrightness = gStats[1].ToDouble();
+        brightnessSamples = gStats[2].ToInt();
+      }
+      
+      knownTextures.Clear();
+      textureScores.Clear();
+      if (parts[1] != "") {
+        Array<string> texPairs;
+        parts[1].Split(texPairs, ",");
+        for(int i = 0; i < texPairs.Size(); i++) {
+          Array<string> kv;
+          texPairs[i].Split(kv, ":");
+          if (kv.Size() == 2) {
+            knownTextures.Push(kv[0]);
+            textureScores.Push(kv[1].ToDouble());
+          }
+        }
+      }
+      
+      for(int p = 2; p < parts.Size(); p++) {
+         if (parts[p] == "") continue;
+         Array<string> mHead;
+         parts[p].Split(mHead, ":");
+         if (mHead.Size() >= 2 && mHead[0] == "M") {
+            string mHash = mHead[1];
+            HoloMapKnowledge existing = null;
+            for(int i = 0; i < sessionKnowledge.Size(); i++) {
+               if (sessionKnowledge[i].mapHash == mHash) {
+                  existing = sessionKnowledge[i];
+                  break;
+               }
+            }
+            if (!existing) {
+               existing = new("HoloMapKnowledge");
+               existing.mapHash = mHash;
+               sessionKnowledge.Push(existing);
+            }
+            
+            if (mHead.Size() >= 3 && mHead[2] != "") {
+               Array<string> indices;
+               mHead[2].Split(indices, ",");
+               int maxIdx = -1;
+               for(int i = 0; i < indices.Size(); i++) {
+                 int idx = indices[i].ToInt();
+                 if (idx > maxIdx) maxIdx = idx;
+               }
+               if (maxIdx >= existing.adjProven.Size()) {
+                 existing.adjProven.Resize(maxIdx + 1);
+               }
+               for(int i = 0; i < indices.Size(); i++) {
+                 int idx = indices[i].ToInt();
+                 if (idx >= 0 && idx < existing.adjProven.Size()) {
+                   existing.adjProven[idx] = true;
+                 }
+               }
+            }
+         }
+      }
+    }
+  }
+
   override void WorldLoaded(WorldEvent e) {
     PlayerInfo plyr = players[consoleplayer];
     bool usePersistent = false;
@@ -212,7 +323,7 @@ class HoloGPSHandler : StaticEventHandler {
       HoloMapKnowledge saved = null;
       int existingIdx = -1;
       for (int i = 0; i < sessionKnowledge.Size(); i++) {
-        if (sessionKnowledge[i].mapName == lastMapName) {
+        if (sessionKnowledge[i].mapHash == lastMapName) {
           saved = sessionKnowledge[i];
           existingIdx = i;
           break;
@@ -220,7 +331,7 @@ class HoloGPSHandler : StaticEventHandler {
       }
       if (!saved) {
         saved = new("HoloMapKnowledge");
-        saved.mapName = lastMapName;
+        saved.mapHash = lastMapName;
         sessionKnowledge.Push(saved);
       } else if (existingIdx >= 0) {
         sessionKnowledge.Delete(existingIdx);
@@ -252,7 +363,7 @@ class HoloGPSHandler : StaticEventHandler {
     BuildAdjacencyGraph();
 
     string currentMap = level.MapName.MakeLower();
-    lastMapName = currentMap;
+    lastMapName = GetMapHash();
 
     int numSectors = level.sectors.Size();
     sectorPheromone.Clear();
@@ -268,7 +379,7 @@ class HoloGPSHandler : StaticEventHandler {
       HoloMapKnowledge loaded = null;
       int loadedIdx = -1;
       for (int i = 0; i < sessionKnowledge.Size(); i++) {
-        if (sessionKnowledge[i].mapName == currentMap) {
+        if (sessionKnowledge[i].mapHash == currentMap) {
           loaded = sessionKnowledge[i];
           loadedIdx = i;
           break;
@@ -491,6 +602,7 @@ class HoloGPSHandler : StaticEventHandler {
           for (int ni = nStart; ni < nEnd; ni++) {
             if (adjNeighbor[ni] == playerSecIdx) {
               adjProven[ni] = true;
+          learningDirty = true;
 
               int rnStart = adjStart[playerSecIdx];
               int rnEnd = adjStart[playerSecIdx + 1];
@@ -641,7 +753,7 @@ class HoloGPSHandler : StaticEventHandler {
       HoloMapKnowledge knowledge = sessionKnowledge[i];
       if (!knowledge) continue;
 
-      totalBytes += knowledge.mapName.Length();
+      totalBytes += knowledge.mapHash.Length();
       totalBytes += knowledge.adjProven.Size() * 1; // 1 byte per bool
       totalBytes += knowledge.sectorPheromone.Size() * 8; // 8 bytes per double
       totalBytes += 64; // Object overhead estimation
@@ -667,8 +779,12 @@ class HoloGPSHandler : StaticEventHandler {
       }
       int totalAdj = adjProven.Size();
       for (int i = 0; i < totalAdj; i++) {
-        adjProven[i] = false;
-      }
+      adjProven[i] = false;
+    }
+    if (plyr) {
+      CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyr);
+      if (cvBlob) DeserializeLearningData(cvBlob.GetString());
+    }
 
       Console.Printf("Holographic GPS: Memory database purged. Freed approx. %.2f KB.", estKB);
     } else if (e.Name == "check_gps_memory") {

@@ -56,6 +56,7 @@ OptionMenu "HoloGPSMenu"
     Option "Persistent Map Knowledge", "holo_gps_learning_persistent", "OnOff"
     Option "Global Heuristic Learning", "holo_gps_learning_heuristics", "OnOff"
     Slider "Max Maps to Remember", "holo_gps_learning_limit", 1, 200, 1
+    StaticText "WARNING: High values (50+) may cause saving/loading lag."
     Command "Check Memory Storage Size", "netevent check_gps_memory"
     Command "Purge GPS Learning Memory", "netevent purge_gps_memory"
 

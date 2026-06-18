@@ -22,6 +22,7 @@ user bool   holo_gps_learning_proven = true;
 user bool   holo_gps_learning_pheromone = true;
 user bool   holo_gps_learning_persistent = true;
 user bool   holo_gps_learning_heuristics = true;
+user string holo_gps_memory_blob = "";
 
 // Speedrun Heuristics
 user bool   holo_gps_sr_momentum = false;
