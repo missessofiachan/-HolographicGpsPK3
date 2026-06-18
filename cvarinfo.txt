@@ -7,3 +7,7 @@ user bool   holo_gps_use_secrets = false; // Route through secret doors
 user int    holo_gps_max_markers = 12;    // Maximum number of arrows to draw
 user bool   holo_gps_fade = true;         // Fade out distant arrows
 user int    holo_gps_color = 0;           // Trail color: 0=Default, 1-8=Custom, 9=Trans Pride
+user float  holo_gps_scale = 0.25;        // Size of the markers
+user float  holo_gps_height = 1.0;        // Float height from the floor
+user int    holo_gps_priority = 0;        // 0=Auto, 1=Keys Only, 2=Exits Only
+user int    holo_gps_style = 0;           // 0=Additive, 1=Translucent

@@ -47,10 +47,10 @@ class HoloGPSHandler : StaticEventHandler
     int tickCounter;
     Array<Actor> activeMarkers;
 
-    // Consolidated reusable tracer instance
+    // Consolidated reusable tracer instance to avoid garbage collector load
     PathfinderTracer mTracer;
 
-    // Dynamically cached CVars to prevent continuous string lookups
+    // Dynamically cached CVars to bypass continuous string lookups
     bool cache_enabled;
     int cache_freq;
     bool cache_use_secrets;
@@ -59,6 +59,10 @@ class HoloGPSHandler : StaticEventHandler
     int cache_max_markers;
     bool cache_fade;
     int cache_color;
+    float cache_scale;
+    float cache_height;
+    int cache_priority;
+    int cache_style;
 
     // Pathfinding result: ordered waypoints from player to target
     Array<double> pathX;
@@ -83,7 +87,6 @@ class HoloGPSHandler : StaticEventHandler
         refinedY.Clear();
         graphBuilt = 0;
         
-        // Allocate single tracer instance for reuse
         mTracer = new("PathfinderTracer");
 
         BuildAdjacencyGraph();
@@ -160,7 +163,7 @@ class HoloGPSHandler : StaticEventHandler
         PlayerInfo plyr = players[consoleplayer];
         if (!plyr || !plyr.mo || plyr.mo.health <= 0) return;
 
-        // Populate dynamic CVar cache once per frame tick
+        // Dynamic CVar lookup cache refresh (bypasses deep string hashing)
         cache_enabled = CVar.GetCVar("holo_gps_enabled", plyr).GetBool();
         cache_freq = CVar.GetCVar("holo_gps_freq", plyr).GetInt();
         cache_use_secrets = CVar.GetCVar("holo_gps_use_secrets", plyr).GetBool();
@@ -169,6 +172,10 @@ class HoloGPSHandler : StaticEventHandler
         cache_max_markers = CVar.GetCVar("holo_gps_max_markers", plyr).GetInt();
         cache_fade = CVar.GetCVar("holo_gps_fade", plyr).GetBool();
         cache_color = CVar.GetCVar("holo_gps_color", plyr).GetInt();
+        cache_scale = CVar.GetCVar("holo_gps_scale", plyr).GetFloat();
+        cache_height = CVar.GetCVar("holo_gps_height", plyr).GetFloat();
+        cache_priority = CVar.GetCVar("holo_gps_priority", plyr).GetInt();
+        cache_style = CVar.GetCVar("holo_gps_style", plyr).GetInt();
 
         if (!cache_enabled) return;
 
@@ -220,57 +227,63 @@ class HoloGPSHandler : StaticEventHandler
         if (!plyr || !plyr.mo) return;
 
         // Pass 1: Find valid, reachable Keys
-        ThinkerIterator it = ThinkerIterator.Create("Key");
-        Key mapKey;
-        while (mapKey = Key(it.Next()))
+        if (cache_priority == 0 || cache_priority == 1)
         {
-            if (!mapKey.owner && !plyr.mo.FindInventory(mapKey.GetClass()))
+            ThinkerIterator it = ThinkerIterator.Create("Key");
+            Key mapKey;
+            while (mapKey = Key(it.Next()))
             {
-                FindPathAStar(plyr.mo, mapKey);
-                if (pathX.Size() > 0)
+                if (!mapKey.owner && !plyr.mo.FindInventory(mapKey.GetClass()))
                 {
-                    currentTarget = mapKey;
-                    return;
-                }
-            }
-        }
-
-        // Pass 2 Fallback: If keys are unreachable, target level exits
-        Array<Actor> exitSpots;
-        for (int i = 0; i < level.lines.Size(); i++)
-        {
-            Line ln = level.lines[i];
-            if (ln && (ln.special == 243 || ln.special == 244 || ln.special == 74 || ln.special == 124))
-            {
-                Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
-                Sector exitSec = level.PointInSector(midpoint);
-                if (!exitSec) continue; // Boundary check prevention
-
-                double z = exitSec.floorplane.ZatPoint(midpoint);
-                Actor spot = Actor.Spawn("MapSpot", (midpoint.x, midpoint.y, z));
-                if (spot) exitSpots.Push(spot);
-            }
-        }
-
-        for (int i = 0; i < exitSpots.Size(); i++)
-        {
-            FindPathAStar(plyr.mo, exitSpots[i]);
-            if (pathX.Size() > 0)
-            {
-                currentTarget = exitSpots[i];
-                
-                for (int j = 0; j < exitSpots.Size(); j++)
-                {
-                    if (i != j && exitSpots[j])
+                    FindPathAStar(plyr.mo, mapKey);
+                    if (pathX.Size() > 0)
                     {
-                        exitSpots[j].Destroy();
+                        currentTarget = mapKey;
+                        return;
                     }
                 }
-                return;
             }
-            else
+        }
+
+        // Pass 2 Fallback: Target level exits
+        if (cache_priority == 0 || cache_priority == 2)
+        {
+            Array<Actor> exitSpots;
+            for (int i = 0; i < level.lines.Size(); i++)
             {
-                exitSpots[i].Destroy(); 
+                Line ln = level.lines[i];
+                if (ln && (ln.special == 243 || ln.special == 244 || ln.special == 74 || ln.special == 124))
+                {
+                    Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
+                    Sector exitSec = level.PointInSector(midpoint);
+                    if (!exitSec) continue; 
+
+                    double z = exitSec.floorplane.ZatPoint(midpoint);
+                    Actor spot = Actor.Spawn("MapSpot", (midpoint.x, midpoint.y, z));
+                    if (spot) exitSpots.Push(spot);
+                }
+            }
+
+            for (int i = 0; i < exitSpots.Size(); i++)
+            {
+                FindPathAStar(plyr.mo, exitSpots[i]);
+                if (pathX.Size() > 0)
+                {
+                    currentTarget = exitSpots[i];
+                    
+                    for (int j = 0; j < exitSpots.Size(); j++)
+                    {
+                        if (i != j && exitSpots[j])
+                        {
+                            exitSpots[j].Destroy();
+                        }
+                    }
+                    return;
+                }
+                else
+                {
+                    exitSpots[i].Destroy(); 
+                }
             }
         }
 
@@ -283,6 +296,16 @@ class HoloGPSHandler : StaticEventHandler
 
         if (ln.flags & Line.ML_BLOCKING) return false;
         if (!cache_use_secrets && (ln.flags & Line.ML_SECRET)) return false;
+
+        // FIX: Lock verification must execute globally for all lines, bypassing flat ceiling conversions
+        if (ln.locknumber != 0)
+        {
+            PlayerPawn plyrPawn = PlayerPawn(player);
+            if (plyrPawn && !plyrPawn.CheckKeys(ln.locknumber, false))
+            {
+                return false; 
+            }
+        }
 
         Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
         double curFloor = curSec.floorplane.ZatPoint(midpoint);
@@ -302,18 +325,7 @@ class HoloGPSHandler : StaticEventHandler
             bool isStandardDoor = (ln.special >= 10 && ln.special <= 13) || ln.special == 105 || ln.special == 106 || ln.special == 202;
             bool isScriptDoor = (ln.special == 80 || ln.special == 226); 
 
-            if (isDirectUse || isStandardDoor || isScriptDoor)
-            {
-                if (ln.locknumber != 0)
-                {
-                    PlayerPawn plyrPawn = PlayerPawn(player);
-                    if (plyrPawn && !plyrPawn.CheckKeys(ln.locknumber, false))
-                    {
-                        return false; 
-                    }
-                }
-            }
-            else
+            if (!isDirectUse && !isStandardDoor && !isScriptDoor)
             {
                 return false;
             }
@@ -345,43 +357,11 @@ class HoloGPSHandler : StaticEventHandler
         Sector startSec = level.PointInSector(player.pos.xy);
         Sector endSec = level.PointInSector(target.pos.xy);
 
-        // Boundary Check Prevention
         if (!startSec || !endSec) return;
 
         int startIdx = startSec.sectornum;
         int endIdx = endSec.sectornum;
-
-        // Localized Structural Proximity Targeting For Shared/Isolated Sectors
         int realEndIdx = endIdx;
-        if (adjStart[realEndIdx] == adjStart[realEndIdx + 1])
-        {
-            double closestDist = 1e37;
-            for (int i = 0; i < level.lines.Size(); i++)
-            {
-                Line ln = level.lines[i];
-                if (!ln || (!ln.frontsector && !ln.backsector)) continue;
-                
-                Vector2 lineMid = (ln.v1.p + ln.v2.p) / 2.0;
-                double d = (lineMid - target.pos.xy).Length(); 
-
-                if (ln.frontsector && ln.frontsector.sectornum == endIdx && ln.backsector)
-                {
-                    int bIdx = ln.backsector.sectornum;
-                    if (adjStart[bIdx] != adjStart[bIdx + 1]) 
-                    {
-                        if (d < closestDist) { closestDist = d; realEndIdx = bIdx; }
-                    }
-                }
-                else if (ln.backsector && ln.backsector.sectornum == endIdx && ln.frontsector)
-                {
-                    int fIdx = ln.frontsector.sectornum;
-                    if (adjStart[fIdx] != adjStart[fIdx + 1])
-                    {
-                        if (d < closestDist) { closestDist = d; realEndIdx = fIdx; }
-                    }
-                }
-            }
-        }
 
         if (startIdx == realEndIdx)
         {
@@ -432,20 +412,11 @@ class HoloGPSHandler : StaticEventHandler
             for (int i = 1; i < openSet.Size(); i++)
             {
                 int node = openSet[i];
-                if (fScore[node] < minF)
-                {
-                    minF = fScore[node];
-                    bestIdx = i;
-                }
+                if (fScore[node] < minF) { minF = fScore[node]; bestIdx = i; }
             }
 
             int current = openSet[bestIdx];
-            
-            if (current == realEndIdx)
-            {
-                found = 1;
-                break;
-            }
+            if (current == realEndIdx) { found = 1; break; }
 
             openSet.Delete(bestIdx);
             inOpenSet[current] = false;
@@ -482,6 +453,99 @@ class HoloGPSHandler : StaticEventHandler
             }
         }
 
+        // Adaptive Pedestal Retry Pass
+        if (found == 0)
+        {
+            int alternativeEndIdx = -1;
+            double closestDist = 1e37;
+
+            for (int i = 0; i < level.lines.Size(); i++)
+            {
+                Line ln = level.lines[i];
+                if (!ln || !ln.frontsector || !ln.backsector) continue;
+
+                int fNum = ln.frontsector.sectornum;
+                int bNum = ln.backsector.sectornum;
+
+                if (fNum == endIdx && bNum != endIdx)
+                {
+                    Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
+                    double d = (mid - target.pos.xy).Length();
+                    if (d < closestDist) { closestDist = d; alternativeEndIdx = bNum; }
+                }
+                else if (bNum == endIdx && fNum != endIdx)
+                {
+                    Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
+                    double d = (mid - target.pos.xy).Length();
+                    if (d < closestDist) { closestDist = d; alternativeEndIdx = fNum; }
+                }
+            }
+
+            if (alternativeEndIdx != -1 && alternativeEndIdx != startIdx)
+            {
+                for (int i = 0; i < numSectors; i++)
+                {
+                    parent[i] = -1; parentLine[i] = -1; reachable[i] = 0;
+                    gScore[i] = 1e37; fScore[i] = 1e37; inOpenSet[i] = false;
+                }
+                openSet.Clear();
+
+                gScore[startIdx] = 0.0;
+                fScore[startIdx] = (level.sectors[startIdx].centerspot - targetPos).Length();
+                reachable[startIdx] = 1;
+                openSet.Push(startIdx);
+                inOpenSet[startIdx] = true;
+
+                while (openSet.Size() > 0)
+                {
+                    int bestIdx = 0;
+                    double minF = fScore[openSet[0]];
+                    for (int i = 1; i < openSet.Size(); i++)
+                    {
+                        int node = openSet[i];
+                        if (fScore[node] < minF) { minF = fScore[node]; bestIdx = i; }
+                    }
+
+                    int current = openSet[bestIdx];
+                    if (current == alternativeEndIdx) { found = 1; realEndIdx = alternativeEndIdx; break; }
+
+                    openSet.Delete(bestIdx);
+                    inOpenSet[current] = false;
+
+                    int nStart = adjStart[current];
+                    int nEnd = adjStart[current + 1];
+                    for (int ni = nStart; ni < nEnd; ni++)
+                    {
+                        int neighbor = adjNeighbor[ni];
+                        Line ln = level.lines[adjLineIdx[ni]];
+                        Sector curSec = level.sectors[current];
+                        Sector nextSec = level.sectors[neighbor];
+
+                        if (IsPortalPassable(curSec, nextSec, ln, player))
+                        {
+                            double dist = (nextSec.centerspot - curSec.centerspot).Length();
+                            double tentativeG = gScore[current] + dist;
+
+                            if (tentativeG < gScore[neighbor])
+                            {
+                                reachable[neighbor] = 1;
+                                parent[neighbor] = current;
+                                parentLine[neighbor] = adjLineIdx[ni];
+                                gScore[neighbor] = tentativeG;
+                                fScore[neighbor] = tentativeG + (nextSec.centerspot - targetPos).Length();
+
+                                if (!inOpenSet[neighbor])
+                                {
+                                    openSet.Push(neighbor);
+                                    inOpenSet[neighbor] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if (found == 1)
         {
             Array<int> reversedLines;
@@ -505,7 +569,7 @@ class HoloGPSHandler : StaticEventHandler
             return;
         }
 
-        // Pass 2 Fallback: Reverse tracking setup for structural blockers
+        // Pass 3: Reverse topological fallback finding the barrier sector
         Array<int> visitedReverse;
         Array<int> queueReverse;
 
@@ -634,7 +698,6 @@ class HoloGPSHandler : StaticEventHandler
 
     bool PathIsBlocked(Vector2 start, Vector2 end)
     {
-        // Reused instance verification
         if (!mTracer) return false;
 
         double floorzA = GetFloorZ(start);
@@ -841,14 +904,17 @@ class HoloGPSHandler : StaticEventHandler
                 }
 
                 Sector spawnSec = level.PointInSector(spawnXY);
-                if (!spawnSec) continue; // Boundary check prevention
+                if (!spawnSec) continue; 
 
                 double floorz = spawnSec.floorplane.ZatPoint(spawnXY);
-                Vector3 spawnPos = (spawnXY.x, spawnXY.y, floorz + 1.0);
+                Vector3 spawnPos = (spawnXY.x, spawnXY.y, floorz + cache_height);
 
                 Actor marker = Actor.Spawn("HoloPathMarker", spawnPos);
                 if (marker)
                 {
+                    if (cache_scale <= 0.0) cache_scale = 0.25;
+                    marker.Scale = (cache_scale, cache_scale);
+
                     double markerAlpha = cache_alpha;
                     if (cache_fade)
                     {
@@ -857,6 +923,9 @@ class HoloGPSHandler : StaticEventHandler
 
                     marker.angle = arrowAngle;
 
+                    int renderStyle = (cache_style == 1) ? STYLE_TranslucentStencil : STYLE_AddStencil;
+                    int defaultStyle = (cache_style == 1) ? STYLE_Translucent : STYLE_Add;
+
                     if (cache_color == 9) // Trans Pride
                     {
                         int cycleStep = spawnedCount % 4;
@@ -864,7 +933,7 @@ class HoloGPSHandler : StaticEventHandler
                         if (cycleStep == 0) transCol = 0x5BCEFA; 
                         else if (cycleStep == 1 || cycleStep == 3) transCol = 0xF5A9B8; 
                         
-                        marker.A_SetRenderStyle(markerAlpha, STYLE_AddStencil);
+                        marker.A_SetRenderStyle(markerAlpha, renderStyle);
                         marker.SetShade(transCol);
                     }
                     else if (cache_color > 0)
@@ -879,12 +948,12 @@ class HoloGPSHandler : StaticEventHandler
                         else if (cache_color == 7) col = 0xFF00FF; 
                         else if (cache_color == 8) col = 0xFFFFFF; 
                         
-                        marker.A_SetRenderStyle(markerAlpha, STYLE_AddStencil);
+                        marker.A_SetRenderStyle(markerAlpha, renderStyle);
                         marker.SetShade(col);
                     }
                     else
                     {
-                        marker.A_SetRenderStyle(markerAlpha, STYLE_Add);
+                        marker.A_SetRenderStyle(markerAlpha, defaultStyle);
                     }
 
                     activeMarkers.Push(marker);

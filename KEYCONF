@@ -1,0 +1,3 @@
+addkeysection "Holographic GPS" HoloGPSSection
+addmenukey "Toggle Navigation Path" holo_gps_toggle
+alias holo_gps_toggle "toggle holo_gps_enabled"
