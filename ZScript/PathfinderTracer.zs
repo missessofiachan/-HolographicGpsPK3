@@ -30,10 +30,9 @@ class PathfinderTracer : LineTracer
 
                 if (front && back)
                 {
-                    double fFloor = front.floorplane.ZatPoint(hitPt);
-                    double fCeil = front.ceilingplane.ZatPoint(hitPt);
-                    double bFloor = back.floorplane.ZatPoint(destHitPt);
-                    double bCeil = back.ceilingplane.ZatPoint(destHitPt);
+                    double fFloor, fCeil, bFloor, bCeil;
+                    HoloGPSHandler.GetEffectiveFloorCeil(front, hitPt, Results.HitPos.z, fFloor, fCeil);
+                    HoloGPSHandler.GetEffectiveFloorCeil(back, destHitPt, Results.HitPos.z, bFloor, bCeil);
 
                     if ((fCeil - fFloor < HoloGPSHandler.CLEARANCE_MIN) || (bCeil - bFloor < HoloGPSHandler.CLEARANCE_MIN))
                     {

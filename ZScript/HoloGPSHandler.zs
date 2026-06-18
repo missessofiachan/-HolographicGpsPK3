@@ -96,6 +96,7 @@ class HoloGPSHandler : StaticEventHandler
     Array<int> openSet;
     Array<bool> inOpenSet;
     Array<int> heapPos;  // Maps sector index → position in openSet heap (-1 if absent)
+    Array<double> sectorZ; // Cached Z height for each sector in A* search
 
     // Persistent helper arrays for reverse topological fallback search
     Array<int> visitedReverse;
@@ -350,7 +351,7 @@ class HoloGPSHandler : StaticEventHandler
             }
 
             pathFresh = false;
-            RefinePath(plyr.mo.pos.xy);
+            RefinePath(plyr.mo.pos.xy, plyr.mo.pos.z);
             SpawnPathMarkers(plyr.mo);
         }
     }
@@ -558,8 +559,10 @@ class HoloGPSHandler : StaticEventHandler
         currentTarget = null;
     }
 
-    bool IsPortalPassable(Sector curSec, Sector nextSec, Line ln, Actor player)
+    bool IsPortalPassable(Sector curSec, Sector nextSec, Line ln, Actor player, double refZ, out double nextFloor)
     {
+        nextFloor = nextSec.floorplane.ZatPoint(ln.v1.p); // Default fallback
+
         if (!ln || !curSec || !nextSec) return false;
 
         if (ln.flags & Line.ML_BLOCKING) return false;
@@ -580,9 +583,9 @@ class HoloGPSHandler : StaticEventHandler
         {
             nextMidpoint = midpoint + ln.getPortalDisplacement();
         }
-        double curFloor, curCeil, nextFloor, nextCeil;
-        GetEffectiveFloorCeil(curSec, midpoint, curFloor, curCeil);
-        GetEffectiveFloorCeil(nextSec, nextMidpoint, nextFloor, nextCeil);
+        double curFloor, curCeil, nextCeil;
+        GetEffectiveFloorCeil(curSec, midpoint, refZ, curFloor, curCeil);
+        GetEffectiveFloorCeil(nextSec, nextMidpoint, curFloor, nextFloor, nextCeil);
 
         if (abs(nextFloor - curFloor) > STEP_HEIGHT_MAX) return false;
 
@@ -695,6 +698,7 @@ class HoloGPSHandler : StaticEventHandler
         int numSectors = level.sectors.Size();
         openSet.Clear();
         heapPos.Resize(numSectors);
+        sectorZ.Resize(numSectors);
 
         for (int i = 0; i < numSectors; i++)
         {
@@ -705,12 +709,14 @@ class HoloGPSHandler : StaticEventHandler
             fScore[i] = SCORE_INFINITY;
             inOpenSet[i] = false;
             heapPos[i] = -1;
+            sectorZ[i] = 0.0;
         }
 
         gScore[startIdx] = 0.0;
         fScore[startIdx] = 0.0;
         reachable[startIdx] = 1;
         inOpenSet[startIdx] = true;
+        sectorZ[startIdx] = player.pos.z;
         HeapPush(startIdx);
 
         while (openSet.Size() > 0)
@@ -728,7 +734,8 @@ class HoloGPSHandler : StaticEventHandler
                 Sector curSec = level.sectors[current];
                 Sector nextSec = level.sectors[neighbor];
 
-                if (IsPortalPassable(curSec, nextSec, ln, player))
+                double nextFloor;
+                if (IsPortalPassable(curSec, nextSec, ln, player, sectorZ[current], nextFloor))
                 {
                     double dist = ln.isLinePortal() ? (nextSec.centerspot + ln.getPortalDisplacement() - curSec.centerspot).Length() : (nextSec.centerspot - curSec.centerspot).Length();
                     double tentativeG = gScore[current] + dist;
@@ -740,6 +747,7 @@ class HoloGPSHandler : StaticEventHandler
                         parentLine[neighbor] = adjLineIdx[ni];
                         gScore[neighbor] = tentativeG;
                         fScore[neighbor] = tentativeG; // Pure Dijkstra
+                        sectorZ[neighbor] = nextFloor;
 
                         if (!inOpenSet[neighbor])
                         {
@@ -791,6 +799,7 @@ class HoloGPSHandler : StaticEventHandler
         int numSectors = level.sectors.Size();
         openSet.Clear();
         heapPos.Resize(numSectors);
+        sectorZ.Resize(numSectors);
 
         for (int i = 0; i < numSectors; i++)
         {
@@ -801,12 +810,14 @@ class HoloGPSHandler : StaticEventHandler
             fScore[i] = SCORE_INFINITY;
             inOpenSet[i] = false;
             heapPos[i] = -1;
+            sectorZ[i] = 0.0;
         }
 
         gScore[startIdx] = 0.0;
         fScore[startIdx] = (level.sectors[startIdx].centerspot - targetPos).Length();
         reachable[startIdx] = 1;
         inOpenSet[startIdx] = true;
+        sectorZ[startIdx] = player.pos.z;
         HeapPush(startIdx);
 
         searchStartIdx = startIdx;
@@ -834,7 +845,8 @@ class HoloGPSHandler : StaticEventHandler
                 Sector curSec = level.sectors[current];
                 Sector nextSec = level.sectors[neighbor];
 
-                if (IsPortalPassable(curSec, nextSec, ln, searchPlayer))
+                double nextFloor;
+                if (IsPortalPassable(curSec, nextSec, ln, searchPlayer, sectorZ[current], nextFloor))
                 {
                     double dist = ln.isLinePortal() ? (nextSec.centerspot + ln.getPortalDisplacement() - curSec.centerspot).Length() : (nextSec.centerspot - curSec.centerspot).Length();
                     double tentativeG = gScore[current] + dist;
@@ -853,6 +865,7 @@ class HoloGPSHandler : StaticEventHandler
                             heuristic = (nextSec.centerspot - searchTargetPos).Length();
                         }
                         fScore[neighbor] = tentativeG + heuristic;
+                        sectorZ[neighbor] = nextFloor;
 
                         if (!inOpenSet[neighbor])
                         {
@@ -1035,6 +1048,7 @@ class HoloGPSHandler : StaticEventHandler
         gScore.Resize(numSectors);
         fScore.Resize(numSectors);
         inOpenSet.Resize(numSectors);
+        sectorZ.Resize(numSectors);
 
         searchPlayer = player;
         searchTarget = target;
@@ -1147,8 +1161,8 @@ class HoloGPSHandler : StaticEventHandler
     }
 
     // Compute effective walkable floor and ceiling at a point, accounting for solid 3D floors.
-    // Finds the highest solid floor at or below the sector ceiling, and the lowest ceiling above it.
-    void GetEffectiveFloorCeil(Sector sec, Vector2 pos, out double floorZ, out double ceilZ)
+    // Finds the highest solid floor at or below refZ + STEP_HEIGHT_MAX, and the lowest ceiling above refZ.
+    clearscope static void GetEffectiveFloorCeil(Sector sec, Vector2 pos, double refZ, out double floorZ, out double ceilZ)
     {
         floorZ = sec.floorplane.ZatPoint(pos);
         ceilZ = sec.ceilingplane.ZatPoint(pos);
@@ -1163,36 +1177,37 @@ class HoloGPSHandler : StaticEventHandler
             double fTop = f3d.top.ZatPoint(pos);
             double fBot = f3d.bottom.ZatPoint(pos);
 
-            // If this 3D floor's top is above the current effective floor
-            // and below the ceiling, it raises the walkable floor
-            if (fTop > floorZ && fTop < ceilZ)
+            // A solid 3D floor acts as a barrier.
+            // If the top of the 3D floor is below refZ, it could be a walkable floor.
+            // We want the highest top that is <= refZ + STEP_HEIGHT_MAX.
+            if (fTop <= refZ + STEP_HEIGHT_MAX && fTop > floorZ)
             {
                 floorZ = fTop;
             }
-            // If this 3D floor's bottom is below the current effective ceiling
-            // and above the floor, it lowers the head clearance
-            if (fBot < ceilZ && fBot > floorZ)
+            // If the bottom of the 3D floor is above refZ, it acts as a ceiling.
+            // We want the lowest bottom that is > refZ.
+            if (fBot > refZ && fBot < ceilZ)
             {
                 ceilZ = fBot;
             }
         }
     }
 
-    double GetFloorZ(Vector2 pos)
+    double GetFloorZ(Vector2 pos, double refZ)
     {
         Sector sec = level.PointInSector(pos);
-        if (!sec) return 0;
+        if (!sec) return refZ;
         double f, c;
-        GetEffectiveFloorCeil(sec, pos, f, c);
+        GetEffectiveFloorCeil(sec, pos, refZ, f, c);
         return f;
     }
 
-    bool PathIsBlocked(Vector2 start, Vector2 end)
+    bool PathIsBlocked(Vector2 start, Vector2 end, double refZ)
     {
         if (!mTracer) return false;
 
-        double floorzA = GetFloorZ(start);
-        double floorzB = GetFloorZ(end);
+        double floorzA = GetFloorZ(start, refZ);
+        double floorzB = GetFloorZ(end, floorzA);
 
         Vector3 pA = (start.x, start.y, floorzA + TRACE_Z_OFFSET);
         Vector3 pB = (end.x, end.y, floorzB + TRACE_Z_OFFSET);
@@ -1215,8 +1230,8 @@ class HoloGPSHandler : StaticEventHandler
             Sector midSec = level.PointInSector(mid);
             if (midSec)
             {
-                double midFloor = midSec.floorplane.ZatPoint(mid);
-                double midCeil = midSec.ceilingplane.ZatPoint(mid);
+                double midFloor, midCeil;
+                GetEffectiveFloorCeil(midSec, mid, floorzA, midFloor, midCeil);
                 // If midpoint has no clearance or a massive floor jump, it's blocked
                 if (midCeil - midFloor < CLEARANCE_MIN) return true;
                 if (abs(midFloor - floorzA) > STEP_HEIGHT_MAX && abs(midFloor - floorzB) > STEP_HEIGHT_MAX) return true;
@@ -1248,12 +1263,12 @@ class HoloGPSHandler : StaticEventHandler
         }
     }
 
-    bool GetDetourPath(Vector2 A, Vector2 B, in out Array<double> outX, in out Array<double> outY, int depth = 0)
+    bool GetDetourPath(Vector2 A, Vector2 B, in out Array<double> outX, in out Array<double> outY, double refZ, int depth = 0)
     {
         if (depth > 3 || !mTracer) return false;
 
-        double floorzA = GetFloorZ(A);
-        double floorzB = GetFloorZ(B);
+        double floorzA = GetFloorZ(A, refZ);
+        double floorzB = GetFloorZ(B, floorzA);
 
         Vector3 start = (A.x, A.y, floorzA + TRACE_Z_OFFSET);
         Vector3 end = (B.x, B.y, floorzB + TRACE_Z_OFFSET);
@@ -1285,22 +1300,24 @@ class HoloGPSHandler : StaticEventHandler
 
         Array<double> path1X;
         Array<double> path1Y;
-        bool ok1 = GetDetourPath(A, d1, path1X, path1Y, depth + 1);
+        bool ok1 = GetDetourPath(A, d1, path1X, path1Y, floorzA, depth + 1);
         if (ok1)
         {
             path1X.Push(d1.x);
             path1Y.Push(d1.y);
-            ok1 = GetDetourPath(d1, B, path1X, path1Y, depth + 1);
+            double d1Floor = GetFloorZ(d1, floorzA);
+            ok1 = GetDetourPath(d1, B, path1X, path1Y, d1Floor, depth + 1);
         }
 
         Array<double> path2X;
         Array<double> path2Y;
-        bool ok2 = GetDetourPath(A, d2, path2X, path2Y, depth + 1);
+        bool ok2 = GetDetourPath(A, d2, path2X, path2Y, floorzA, depth + 1);
         if (ok2)
         {
             path2X.Push(d2.x);
             path2Y.Push(d2.y);
-            ok2 = GetDetourPath(d2, B, path2X, path2Y, depth + 1);
+            double d2Floor = GetFloorZ(d2, floorzA);
+            ok2 = GetDetourPath(d2, B, path2X, path2Y, d2Floor, depth + 1);
         }
 
         if (ok1 && ok2)
@@ -1335,7 +1352,7 @@ class HoloGPSHandler : StaticEventHandler
         return false;
     }
 
-    void RefinePath(Vector2 start)
+    void RefinePath(Vector2 start, double startZ)
     {
         refinedX.Clear();
         refinedY.Clear();
@@ -1343,13 +1360,14 @@ class HoloGPSHandler : StaticEventHandler
         if (pathX.Size() == 0) return;
 
         Vector2 prev = start;
+        double prevZ = startZ;
         for (int i = 0; i < pathX.Size(); i++)
         {
             Vector2 wp = (pathX[i], pathY[i]);
             
             Array<double> detX;
             Array<double> detY;
-            bool ok = GetDetourPath(prev, wp, detX, detY, 0);
+            bool ok = GetDetourPath(prev, wp, detX, detY, prevZ, 0);
             if (ok)
             {
                 for (int j = 0; j < detX.Size(); j++)
@@ -1360,6 +1378,7 @@ class HoloGPSHandler : StaticEventHandler
             }
             refinedX.Push(wp.x);
             refinedY.Push(wp.y);
+            prevZ = GetFloorZ(wp, prevZ);
             prev = wp;
         }
     }
@@ -1374,6 +1393,7 @@ class HoloGPSHandler : StaticEventHandler
 
         Vector2 prevPoint = player.pos.xy;
         Vector2 lastSpawnPos = player.pos.xy;
+        double currentZ = player.pos.z;
         int spawnedCount = 0;
 
         for (int wp = 0; wp < refinedX.Size(); wp++)
@@ -1387,6 +1407,7 @@ class HoloGPSHandler : StaticEventHandler
             if (segLen < 16)
             {
                 prevPoint = waypoint;
+                currentZ = GetFloorZ(waypoint, currentZ);
                 continue;
             }
 
@@ -1405,16 +1426,18 @@ class HoloGPSHandler : StaticEventHandler
                 if ((spawnXY - prevPoint).Length() > segLen)
                     spawnXY = waypoint;
 
-                if (PathIsBlocked(lastSpawnPos, spawnXY))
+                if (PathIsBlocked(lastSpawnPos, spawnXY, currentZ))
                 {
                     lastSpawnPos = spawnXY; 
+                    currentZ = GetFloorZ(spawnXY, currentZ);
                     continue; 
                 }
 
                 Sector spawnSec = level.PointInSector(spawnXY);
                 if (!spawnSec) continue; 
 
-                double floorz = spawnSec.floorplane.ZatPoint(spawnXY);
+                double floorz = GetFloorZ(spawnXY, currentZ);
+                currentZ = floorz;
                 Vector3 spawnPos = (spawnXY.x, spawnXY.y, floorz + cache_height);
 
                 Actor marker;
