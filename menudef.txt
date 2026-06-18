@@ -36,6 +36,9 @@ OptionMenu "HoloGPSMenu"
 {
     Title "HOLOGRAPHIC GPS CONFIG"
 
+    Submenu "Presets & Quick Configs", "HoloGPSPresets"
+    StaticText "" // Blank spacer line
+
     // Master Switch
     Option "Enable Navigation Path", "holo_gps_enabled", "OnOff"
     Option "Objective Priority", "holo_gps_priority", "HoloGPSPriorityList"
@@ -102,4 +105,20 @@ OptionMenu "HoloGPSMenu"
     
     // Restore Defaults Button
     Command "Restore Default Settings", "reset holo_gps_enabled; reset holo_gps_priority; reset holo_gps_extended_search; reset holo_gps_wolfendoom_compat; reset holo_gps_use_secrets; reset holo_gps_spacing; reset holo_gps_freq; reset holo_gps_max_markers; reset holo_gps_scale; reset holo_gps_height; reset holo_gps_alpha; reset holo_gps_fade; reset holo_gps_color; reset holo_gps_style; reset holo_gps_hazard_avoidance; reset holo_gps_target_snapping; reset holo_gps_raycast_detouring; reset holo_gps_learning_proven; reset holo_gps_learning_pheromone; reset holo_gps_learning_persistent; reset holo_gps_learning_heuristics; reset holo_gps_sr_momentum; reset holo_gps_sr_door_penalty; reset holo_gps_sr_monster_avoidance; reset holo_gps_sr_clearance; reset holo_gps_sr_reckless; reset holo_gps_clearance_min; reset holo_gps_step_max; reset holo_gps_weight_doors; reset holo_gps_weight_monsters; reset holo_gps_weight_momentum; reset holo_gps_3dfloors; reset holo_gps_portals; reset holo_gps_solve_switches; reset holo_gps_smoothing; reset holo_gps_learning_limit"
+}
+
+OptionMenu "HoloGPSPresets"
+{
+    Title "PRESETS & QUICK CONFIGS"
+
+    StaticText "Select a preset to instantly configure the GPS."
+    StaticText ""
+    
+    Command "Maximum Performance", "holo_gps_freq 5; holo_gps_spacing 64; holo_gps_max_markers 100; holo_gps_3dfloors false; holo_gps_portals false; holo_gps_solve_switches false; holo_gps_smoothing false; holo_gps_raycast_detouring false; holo_gps_extended_search false; holo_gps_sr_momentum false; holo_gps_sr_door_penalty false; holo_gps_sr_monster_avoidance false; holo_gps_sr_clearance false; holo_gps_sr_reckless false"
+    
+    Command "Balanced (Recommended Default)", "holo_gps_freq 2; holo_gps_spacing 32; holo_gps_max_markers 300; holo_gps_3dfloors true; holo_gps_portals true; holo_gps_solve_switches true; holo_gps_smoothing false; holo_gps_raycast_detouring true; holo_gps_extended_search true; holo_gps_sr_momentum false; holo_gps_sr_door_penalty false; holo_gps_sr_monster_avoidance false; holo_gps_sr_clearance false; holo_gps_sr_reckless false"
+    
+    Command "Maximum Accuracy", "holo_gps_freq 1; holo_gps_spacing 16; holo_gps_max_markers 500; holo_gps_3dfloors true; holo_gps_portals true; holo_gps_solve_switches true; holo_gps_smoothing true; holo_gps_raycast_detouring true; holo_gps_extended_search true; holo_gps_sr_momentum false; holo_gps_sr_door_penalty false; holo_gps_sr_monster_avoidance false; holo_gps_sr_clearance false; holo_gps_sr_reckless false"
+
+    Command "Speedrunner Mode", "holo_gps_freq 1; holo_gps_spacing 48; holo_gps_max_markers 300; holo_gps_hazard_avoidance false; holo_gps_sr_momentum true; holo_gps_sr_door_penalty true; holo_gps_sr_monster_avoidance true; holo_gps_sr_clearance true; holo_gps_sr_reckless true"
 }
