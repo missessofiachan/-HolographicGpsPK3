@@ -61,5 +61,9 @@ OptionMenu "HoloGPSMenu"
     Option "Fade Distant Markers", "holo_gps_fade", "OnOff"
     Option "Trail Color", "holo_gps_color", "HoloGPSColorList"
     Option "Render Style", "holo_gps_style", "HoloGPSStyleList"
-}
 
+    StaticText "" // Blank spacer line
+    
+    // Restore Defaults Button
+    Command "Restore Default Settings", "reset holo_gps_enabled; reset holo_gps_priority; reset holo_gps_extended_search; reset holo_gps_wolfendoom_compat; reset holo_gps_use_secrets; reset holo_gps_spacing; reset holo_gps_freq; reset holo_gps_max_markers; reset holo_gps_scale; reset holo_gps_height; reset holo_gps_alpha; reset holo_gps_fade; reset holo_gps_color; reset holo_gps_style"
+}
