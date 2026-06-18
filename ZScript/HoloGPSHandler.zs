@@ -23,12 +23,12 @@ class PathfinderTracer : LineTracer
                     double bFloor = back.floorplane.ZatPoint(hitPt);
                     double bCeil = back.ceilingplane.ZatPoint(hitPt);
 
-                    if ((fCeil - fFloor < 56.0) || (bCeil - bFloor < 56.0))
+                    if ((fCeil - fFloor < HoloGPSHandler.CLEARANCE_MIN) || (bCeil - bFloor < HoloGPSHandler.CLEARANCE_MIN))
                     {
                         return TRACE_Stop;
                     }
 
-                    if ((fFloor - bFloor > 24.0) || (bFloor - fFloor > 24.0))
+                    if ((fFloor - bFloor > HoloGPSHandler.STEP_HEIGHT_MAX) || (bFloor - fFloor > HoloGPSHandler.STEP_HEIGHT_MAX))
                     {
                         return TRACE_Stop;
                     }
@@ -43,6 +43,16 @@ class PathfinderTracer : LineTracer
 
 class HoloGPSHandler : StaticEventHandler
 {
+    // Navigation geometry thresholds
+    const CLEARANCE_MIN = 56.0;       // Minimum ceiling-floor gap to consider passable
+    const CLEARANCE_MIN_WOLF = 40.0;  // Relaxed clearance for WolfenDoom elevator logic
+    const STEP_HEIGHT_MAX = 24.0;     // Maximum floor height difference to step over
+    const TRACE_Z_OFFSET = 16.0;      // Height above floor for line-of-sight traces
+    const EXIT_NORMAL_PUSH = 32.0;    // Distance to push exit targets away from their line
+    const DETOUR_WALL_MARGIN = 32.0;  // Longitudinal margin when detouring around walls
+    const DETOUR_PERP_MARGIN = 24.0;  // Perpendicular margin when detouring around walls
+    const SCORE_INFINITY = 1e37;      // Sentinel value for unreached A* nodes
+
     Actor currentTarget;
     int tickCounter;
     Array<Actor> activeMarkers;
@@ -365,7 +375,7 @@ class HoloGPSHandler : StaticEventHandler
                     {
                         Vector2 lineVec = ln.v2.p - ln.v1.p;
                         Vector2 normal = (lineVec.y, -lineVec.x).Unit(); // Right hand normal points to front sector
-                        midpoint = midpoint + normal * 32.0;
+                        midpoint = midpoint + normal * EXIT_NORMAL_PUSH;
                     }
 
                     Sector exitSec = level.PointInSector(midpoint);
@@ -425,16 +435,16 @@ class HoloGPSHandler : StaticEventHandler
         double nextFloor = nextSec.floorplane.ZatPoint(midpoint);
         double nextCeil = nextSec.ceilingplane.ZatPoint(midpoint);
 
-        if (nextFloor - curFloor > 24.0) return false;
+        if (nextFloor - curFloor > STEP_HEIGHT_MAX) return false;
 
         double portalFloor = (curFloor > nextFloor) ? curFloor : nextFloor;
         double portalCeil = (curCeil < nextCeil) ? curCeil : nextCeil;
         double clearance = portalCeil - portalFloor;
 
         // FIX: Lowered clearance check if WolfenDoom compat is enabled
-        if (clearance < 56.0)
+        if (clearance < CLEARANCE_MIN)
         {
-            if (cache_wolfendoom_compat && clearance >= 40.0)
+            if (cache_wolfendoom_compat && clearance >= CLEARANCE_MIN_WOLF)
             {
                 // Pass for tight WolfenDoom elevator logic
             }
@@ -503,8 +513,8 @@ class HoloGPSHandler : StaticEventHandler
             parent[i] = -1;
             parentLine[i] = -1;
             reachable[i] = 0;
-            gScore[i] = 1e37; 
-            fScore[i] = 1e37;
+            gScore[i] = SCORE_INFINITY; 
+            fScore[i] = SCORE_INFINITY;
             inOpenSet[i] = false;
         }
 
@@ -570,7 +580,7 @@ class HoloGPSHandler : StaticEventHandler
         if (found == 0)
         {
             int alternativeEndIdx = -1;
-            double closestDist = 1e37;
+            double closestDist = SCORE_INFINITY;
 
             for (int i = 0; i < level.lines.Size(); i++)
             {
@@ -599,7 +609,7 @@ class HoloGPSHandler : StaticEventHandler
                 for (int i = 0; i < numSectors; i++)
                 {
                     parent[i] = -1; parentLine[i] = -1; reachable[i] = 0;
-                    gScore[i] = 1e37; fScore[i] = 1e37; inOpenSet[i] = false;
+                    gScore[i] = SCORE_INFINITY; fScore[i] = SCORE_INFINITY; inOpenSet[i] = false;
                 }
                 openSet.Clear();
 
@@ -725,7 +735,7 @@ class HoloGPSHandler : StaticEventHandler
 
         int bestSwitchSector = -1;
         Line bestSwitchLine = null;
-        int minPathSteps = 999999;
+        int minPathSteps = int.MAX;
 
         for (int li = 0; li < level.lines.Size(); li++)
         {
@@ -814,8 +824,8 @@ class HoloGPSHandler : StaticEventHandler
         double floorzA = GetFloorZ(start);
         double floorzB = GetFloorZ(end);
 
-        Vector3 pA = (start.x, start.y, floorzA + 16.0);
-        Vector3 pB = (end.x, end.y, floorzB + 16.0);
+        Vector3 pA = (start.x, start.y, floorzA + TRACE_Z_OFFSET);
+        Vector3 pB = (end.x, end.y, floorzB + TRACE_Z_OFFSET);
 
         Vector3 diff = pB - pA;
         double len = diff.Length();
@@ -858,8 +868,8 @@ class HoloGPSHandler : StaticEventHandler
         double floorzA = GetFloorZ(A);
         double floorzB = GetFloorZ(B);
 
-        Vector3 start = (A.x, A.y, floorzA + 16.0);
-        Vector3 end = (B.x, B.y, floorzB + 16.0);
+        Vector3 start = (A.x, A.y, floorzA + TRACE_Z_OFFSET);
+        Vector3 end = (B.x, B.y, floorzB + TRACE_Z_OFFSET);
 
         Vector3 diff = end - start;
         double len = diff.Length();
@@ -883,8 +893,8 @@ class HoloGPSHandler : StaticEventHandler
             perp = -perp;
         }
 
-        Vector2 d1 = hitLn.v1.p - lnDir * 32.0 + perp * 24.0;
-        Vector2 d2 = hitLn.v2.p + lnDir * 32.0 + perp * 24.0;
+        Vector2 d1 = hitLn.v1.p - lnDir * DETOUR_WALL_MARGIN + perp * DETOUR_PERP_MARGIN;
+        Vector2 d2 = hitLn.v2.p + lnDir * DETOUR_WALL_MARGIN + perp * DETOUR_PERP_MARGIN;
 
         Array<double> path1X;
         Array<double> path1Y;
