@@ -1,4 +1,18 @@
 
+// HoloGPSHandler is a StaticEventHandler that coordinates the pathfinding and marker projection logic.
+// Design & Implementation Details:
+// - Adjacency Graph: Pre-built once per map load (`BuildAdjacencyGraph`) using a CSR (Compressed Sparse Row)
+//   representation (`adjStart`, `adjNeighbor`, `adjLineIdx`) to avoid nested allocations and maximize cache efficiency.
+// - Memory Management: Helper arrays (`parent`, `reachable`, `gScore`, `fScore`, `openSet`, `heapPos`, `sectorZ`, etc.)
+//   are class members resized once, avoiding frame-by-frame allocation/deallocation to bypass GC thrashing.
+// - Performance Optimization: Config CVars are cached (`cache_enabled`, `cache_freq`, etc.) because GZDoom CVar lookups
+//   incur string hash stutters if evaluated per-frame. Logic executes on a throttled tick interval (`cache_freq`).
+// - Multi-Stage Pathfinding State Machine:
+//   1. ASTAR_DIRECT: Attempts to find the shortest Euclidean path from player to target (keys first, then exits).
+//   2. ASTAR_PEDESTAL: Fallback search if a target is raised on a pedestal/pillar (finds adjacent walkable sectors).
+//   3. REVERSE_BFS: If direct A* fails, runs a reverse topological BFS from the target to find the first impassable
+//      barrier/door. Then scans map lines for switches that open this barrier.
+//   4. ASTAR_SWITCH: Routes the player to the closest reachable switch that unlocks the barrier first, solving the map puzzle.
 class HoloGPSHandler : StaticEventHandler
 {
     // Navigation geometry thresholds
@@ -96,7 +110,7 @@ class HoloGPSHandler : StaticEventHandler
     Array<int> openSet;
     Array<bool> inOpenSet;
     Array<int> heapPos;  // Maps sector index → position in openSet heap (-1 if absent)
-    Array<double> sectorZ; // Cached Z height for each sector in A* search
+    Array<double> sectorZ; // Cached Z height for each sector reached in A* search; used to propagate vertical level across 3D floors/bridges
 
     // Persistent helper arrays for reverse topological fallback search
     Array<int> visitedReverse;
@@ -146,6 +160,13 @@ class HoloGPSHandler : StaticEventHandler
         FindNextObjective();
     }
 
+    // Builds a static topological graph of the level's sectors once on map load.
+    // Why: Parsing mappers' level geometry in real-time is too slow for 35 FPS ticks.
+    // How (CSR - Compressed Sparse Row):
+    // - Pass 1: Counts the number of passable neighbors (linedef connections) for each sector.
+    // - Creates prefix-sum index pointers (`adjStart`).
+    // - Pass 2: Fills the contiguous flat arrays (`adjNeighbor`, `adjLineIdx`) with neighbor sector indices.
+    // This avoids multi-dimensional dynamic arrays, preventing memory fragmentation and VM garbage collector overhead.
     void BuildAdjacencyGraph()
     {
         int numSectors = level.sectors.Size();
@@ -356,9 +377,12 @@ class HoloGPSHandler : StaticEventHandler
         }
     }
 
+    // Actor Pooling System:
+    // Spawning and destroying actors in GZDoom triggers expensive memory allocation and sector relinking.
+    // To prevent garbage collection stutters (GC thrashing) and micro-lags, we keep visual marker actors alive in a pool.
+    // When clearing markers, we simply hide them (STYLE_None) rather than calling Destroy(), ready to be reused.
     void ClearOldMarkers()
     {
-        // Hide pooled markers instead of destroying them
         for (int i = 0; i < activeMarkers.Size(); i++)
         {
             if (activeMarkers[i] && !activeMarkers[i].bDestroyed)
@@ -368,6 +392,16 @@ class HoloGPSHandler : StaticEventHandler
         }
     }
 
+    // Scans the map to identify the next progression objective (keys first, then exits).
+    // Why: To automate the progression sequence of picking up keys before routing to the exit.
+    // How:
+    // - Pass 1: Scans the thinker directory for key items. Uses name/sprite matching to support custom maps/mods.
+    // - Filters out keys already present in the player's inventory.
+    // - Marks all uncollected key sectors as goals and runs a Multi-Goal Dijkstra search. The search terminates
+    //   upon reaching the closest key, resolving the nearest reachable key in $O(N \log N)$ time.
+    // - Pass 2: If no keys remain or keys are disabled, scans linedefs for exit specials (e.g. Exit_Normal, Exit_Secret).
+    //   Spawns temporary MapSpots, offsets their coordinates to front sector space (preventing crevice stuck checks),
+    //   and routes the player to the nearest exit.
     void FindNextObjective()
     {
         searchState = ASYNC_STATE_IDLE;
@@ -559,9 +593,12 @@ class HoloGPSHandler : StaticEventHandler
         currentTarget = null;
     }
 
+    // Evaluates if a portal (linedef connection) can be walked through by the player,
+    // taking into account lock constraints, blocking flags, clearance, and step heights.
+    // Propagates vertical level (refZ) to calculate and output nextFloor for the neighboring sector.
     bool IsPortalPassable(Sector curSec, Sector nextSec, Line ln, Actor player, double refZ, out double nextFloor)
     {
-        nextFloor = nextSec.floorplane.ZatPoint(ln.v1.p); // Default fallback
+        nextFloor = nextSec.floorplane.ZatPoint(ln.v1.p); // Default fallback if checks fail early
 
         if (!ln || !curSec || !nextSec) return false;
 
@@ -584,7 +621,11 @@ class HoloGPSHandler : StaticEventHandler
             nextMidpoint = midpoint + ln.getPortalDisplacement();
         }
         double curFloor, curCeil, nextCeil;
+        // Resolve the effective floor/ceiling heights at the portal crossing point,
+        // using the propagated reference Z of the current sector.
         GetEffectiveFloorCeil(curSec, midpoint, refZ, curFloor, curCeil);
+        // Calculate the neighbor sector's effective floor/ceiling, referencing the resolved current floor
+        // to ensure we align with the correct vertical layer (e.g. crossing a bridge vs under it).
         GetEffectiveFloorCeil(nextSec, nextMidpoint, curFloor, nextFloor, nextCeil);
 
         if (abs(nextFloor - curFloor) > STEP_HEIGHT_MAX) return false;
@@ -627,7 +668,15 @@ class HoloGPSHandler : StaticEventHandler
         return false;
     }
 
-    // --- Binary min-heap helpers operating on openSet[], keyed by fScore[] ---
+    // --- Binary Min-Heap Priority Queue implementation ---
+    // Why: A* and Dijkstra searches require retrieving the node with the lowest `fScore` at each iteration.
+    //      A linear search on a large array takes $O(M)$ time, which becomes a bottleneck on complex maps.
+    //      A binary heap allows extracting the minimum element in $O(\log M)$ time.
+    // How:
+    // - `openSet` stores the sector numbers matching the heap tree nodes.
+    // - `heapPos` acts as an inverse lookup map (sector index -> heap index). This enables checking
+    //   membership in $O(1)$ and updating a sector's position via `HeapSiftUp` in $O(\log M)$ when its score decreases,
+    //   effectively implementing a fast Dijkstra decrease-key operation.
 
     void HeapSwap(int a, int b)
     {
@@ -747,6 +796,8 @@ class HoloGPSHandler : StaticEventHandler
                         parentLine[neighbor] = adjLineIdx[ni];
                         gScore[neighbor] = tentativeG;
                         fScore[neighbor] = tentativeG; // Pure Dijkstra
+                        // Propagate the calculated floor Z height to the neighbor sector
+                        // so that subsequent traversals starting from the neighbor correctly reference this vertical tier.
                         sectorZ[neighbor] = nextFloor;
 
                         if (!inOpenSet[neighbor])
@@ -865,6 +916,8 @@ class HoloGPSHandler : StaticEventHandler
                             heuristic = (nextSec.centerspot - searchTargetPos).Length();
                         }
                         fScore[neighbor] = tentativeG + heuristic;
+                        // Propagate the calculated floor Z height to the neighbor sector
+                        // so that subsequent traversals starting from the neighbor correctly reference this vertical tier.
                         sectorZ[neighbor] = nextFloor;
 
                         if (!inOpenSet[neighbor])
@@ -904,6 +957,15 @@ class HoloGPSHandler : StaticEventHandler
         searchLi = 0;
     }
 
+    // Runs a reverse topological Breadth-First Search (BFS) starting from the unreachable target
+    // back toward the player's reachable zone.
+    // Why: To solve progression puzzles (e.g. door locked by a remote switch).
+    // How:
+    // - Pass 1: Traverses neighbors backward from the target. The first sector it hits that has an adjacent
+    //   neighbor in the player's reachable zone is identified as the "barrier sector" (the locked door/gate).
+    // - Pass 2: Scans all level linedefs for player-triggerable switches/walkovers that trigger the barrier sector's tags.
+    // - If a switch is located in a sector the player can currently reach, it selects the closest switch as the detour target,
+    //   guiding the player to unlock the progression path!
     int ResumeReverseBFSAsync(int limit)
     {
         int iterations = 0;
@@ -1161,7 +1223,10 @@ class HoloGPSHandler : StaticEventHandler
     }
 
     // Compute effective walkable floor and ceiling at a point, accounting for solid 3D floors.
-    // Finds the highest solid floor at or below refZ + STEP_HEIGHT_MAX, and the lowest ceiling above refZ.
+    // Partitioning the sector's vertical space based on refZ:
+    // - Finds the highest solid floor at or below refZ + STEP_HEIGHT_MAX (allowing stepping up/down).
+    // - Finds the lowest ceiling (or bottom of a 3D floor) directly above refZ.
+    // This allows the pathfinder and tracer to distinguish between stacked 3D levels (e.g. on a bridge vs under it).
     clearscope static void GetEffectiveFloorCeil(Sector sec, Vector2 pos, double refZ, out double floorZ, out double ceilZ)
     {
         floorZ = sec.floorplane.ZatPoint(pos);
@@ -1202,13 +1267,17 @@ class HoloGPSHandler : StaticEventHandler
         return f;
     }
 
+    // Performs a 3D raycast line trace to determine if the line of sight between start and end is blocked
+    // by geometry (walls, ceilings, floors, portals). Uses refZ to resolve the correct 3D floor layer.
     bool PathIsBlocked(Vector2 start, Vector2 end, double refZ)
     {
         if (!mTracer) return false;
 
+        // Resolve Z coordinate on start/end using the reference Z context
         double floorzA = GetFloorZ(start, refZ);
         double floorzB = GetFloorZ(end, floorzA);
 
+        // Raycast is performed at TRACE_Z_OFFSET height above the resolved floor Z
         Vector3 pA = (start.x, start.y, floorzA + TRACE_Z_OFFSET);
         Vector3 pB = (end.x, end.y, floorzB + TRACE_Z_OFFSET);
 
@@ -1220,10 +1289,11 @@ class HoloGPSHandler : StaticEventHandler
         Sector sec = level.PointInSector(start);
         if (!sec) return false;
 
+        // Trace ray using PathfinderTracer
         mTracer.Trace(pA, sec, dir, len, TRACE_ReportPortals, 0xFFFFFFFF, true);
         if (mTracer.Results.HitType != TRACE_HitNone) return true;
 
-        // Validate midpoint: catch traces that clip through thin walls
+        // Validate midpoint: catch traces that clip through thin walls or vertical level transitions
         if (len > 64.0)
         {
             Vector2 mid = (start + end) * 0.5;
@@ -1231,6 +1301,7 @@ class HoloGPSHandler : StaticEventHandler
             if (midSec)
             {
                 double midFloor, midCeil;
+                // Query effective heights at the midpoint using floorzA as reference height
                 GetEffectiveFloorCeil(midSec, mid, floorzA, midFloor, midCeil);
                 // If midpoint has no clearance or a massive floor jump, it's blocked
                 if (midCeil - midFloor < CLEARANCE_MIN) return true;
@@ -1263,6 +1334,15 @@ class HoloGPSHandler : StaticEventHandler
         }
     }
 
+    // Calculates a physical detour around a blocking wall or corner between two points A and B.
+    // Why: A* outputs topological waypoints (midpoints of portals/lines), which can result in lines
+    //      clipping corners of walls or pillars.
+    // How (Recursive Detour Raycast):
+    // - Traces a ray from A to B. If it hits a linedef (`hitLn`):
+    // - Finds the two endpoints of the hit line, and offsets them outward (`DETOUR_WALL_MARGIN`, `DETOUR_PERP_MARGIN`)
+    //   to generate two candidate detour points (d1 and d2).
+    // - Recursively solves `GetDetourPath(A, d1, ...)` and `GetDetourPath(d1, B, ...)` (and similarly for d2).
+    // - Selects the shorter of the two detour paths that compiles successfully, refining the path to wrap smoothly around corners.
     bool GetDetourPath(Vector2 A, Vector2 B, in out Array<double> outX, in out Array<double> outY, double refZ, int depth = 0)
     {
         if (depth > 3 || !mTracer) return false;
@@ -1441,15 +1521,16 @@ class HoloGPSHandler : StaticEventHandler
                 Vector3 spawnPos = (spawnXY.x, spawnXY.y, floorz + cache_height);
 
                 Actor marker;
+                // Reuse existing pooled marker to bypass the expensive instantiation of a new Actor.
+                // We just warp its coordinates using SetOrigin, avoiding CPU/memory overhead.
                 if (spawnedCount < activeMarkers.Size() && activeMarkers[spawnedCount] && !activeMarkers[spawnedCount].bDestroyed)
                 {
-                    // Reuse existing pooled marker
                     marker = activeMarkers[spawnedCount];
                     marker.SetOrigin(spawnPos, false);
                 }
                 else
                 {
-                    // Pool is exhausted — spawn a new one
+                    // If the pool is completely exhausted, spawn a new actor and append it to our pool.
                     marker = Actor.Spawn("HoloPathMarker", spawnPos);
                     if (marker)
                     {

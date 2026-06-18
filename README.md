@@ -1,19 +1,20 @@
-# # Holographic GPS Navigation Mod (`.pk3`)
+# Holographic GPS Navigation Mod (`.pk3`)
 
-A lightweight, dynamic navigation assistant for GZDoom. This mod automatically tracks map objectives, sequences puzzle progression (such as keys before exits), and projects a customizable holographic pathway directly onto the map floor to guide you along an optimal line-of-sight route.
+A lightweight, dynamic navigation assistant for GZDoom and compatible engines. This mod automatically tracks map objectives, sequences puzzle progression (such as routing to keys and remote switches before exits), and projects a customizable holographic pathway directly onto the map floor to guide you along an optimal line-of-sight route.
 
 ---
 
-## ## Features
+## Features
 
-* **Objective Sequence Manager:** Dynamically scans map geometry upon level load. It prioritizes required keys and switches before redirecting your path to the level exit.
-* **Dynamic Updating:** Path markers recalculate instantly when you pick up a progression key or step out of bounds.
-* **Performance In-Engine Optimization:** Features time-sliced tick throttling to ensure smooth frame rates, even on massive community slaughter maps.
+* **Objective Sequence Manager:** Dynamically scans map geometry upon level load. It prioritizes required progression keys and switches before redirecting your path to the level exit.
+* **3D Floor & Bridge Awareness:** Fully supports multi-tiered geometry, routing pathways both over and under bridges and tunnels by propagating and validating 3D heights ($Z$) across sector transitions.
+* **Dynamic Updating:** Path markers recalculate instantly when you pick up a progression key, toggle a switch, or step out of bounds.
+* **Performance In-Engine Optimization:** Features time-sliced tick throttling and pre-built CSR adjacency graphs to ensure smooth frame rates, even on massive community slaughter maps.
 * **Fully Configurable Interface:** Includes a native GZDoom options menu to adjust spacing, update intervals, opacity, and toggle states on the fly.
 
 ---
 
-## ## File Structure
+## File Structure
 
 For development or compiling your own build, ensure your directory is laid out exactly as follows before archiving:
 
@@ -21,24 +22,24 @@ For development or compiling your own build, ensure your directory is laid out e
 HoloGPSMod/
 ├── ZScript/
 │   ├── HoloMarker.zs       # Defines the visual rendering of the hologram
-│   └── HoloGPSHandler.zs   # Houses vector tracing and objective logic
+│   ├── PathfinderTracer.zs # Performs 3D raycast line-of-sight checks
+│   └── HoloGPSHandler.zs   # Houses A* pathfinding, detour, and objective logic
 ├── sprites/
-│   └── AMRKA0.png          # Your custom 64x64 or 128x128 transparent sprite
+│   └── AMRKA0.png          # Custom transparent sprite for the path markers
 ├── cvarinfo.txt            # Defines global user configuration variables
 ├── menudef.txt             # Implements the visual Options Menu engine hook
 └── zscript.txt             # Master engine assembly bootstrapper
-
 ```
 
 ---
 
-## ## Installation & Usage
+## Installation & Usage
 
 ### For Players
 
 1. Download the compiled `HoloGPS.pk3` file.
-2. Drag and drop the `.pk3` directly onto your GZDoom executable, or load it via your preferred launcher (e.g., ZDL, Doom Runner).
-3. Open the game, press `ESC` $\rightarrow$ Go to **Options** $\rightarrow$ Click **Holographic GPS Options** to customize your pathing behavior.
+2. Drag and drop the `.pk3` directly onto your GZDoom/UZDoom executable, or load it via your preferred launcher (e.g., ZDL, Doom Runner).
+3. Open the game, press `ESC` -> Go to **Options** -> Click **Holographic GPS Options** to customize your pathing behavior.
 
 ### For Developers (Compiling from Source)
 
@@ -48,7 +49,7 @@ HoloGPSMod/
 
 ---
 
-## ## Configuration Settings
+## Configuration Settings
 
 Accessible via the native **Options Menu**:
 
@@ -61,8 +62,8 @@ Accessible via the native **Options Menu**:
 
 ---
 
-## ## Technical & Compatibility Notes
+## Technical & Compatibility Notes
 
-* **Engine Requirements:** Target environment is GZDoom v4.10 or higher.
+* **Engine Requirements:** Target environment is GZDoom/UZDoom v4.10 or higher.
 * **Render Pipeline:** This mod utilizes `Style_Add` blending for a pristine translucent neon glow. Hardware acceleration (OpenGL/Vulkan) is highly recommended for best results.
 * **Compatibility:** Designed natively using global `StaticEventHandler` monitoring. It does not alter actor inventory structures or player states, ensuring 100% compatibility with massive gameplay overhauls like *Brutal Doom* or *Project Brutality*.
