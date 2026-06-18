@@ -1061,7 +1061,7 @@ class HoloGPSHandler : StaticEventHandler {
     if (ln.isLinePortal()) {
       nextMidpoint = midpoint + ln.getPortalDisplacement();
     }
-    double curFloor, curCeil, nextCeil;
+    double curFloor, curCeil;
     // Resolve the effective floor/ceiling heights at the portal crossing point,
     // using the propagated reference Z of the current sector.
     GetEffectiveFloorCeil(curSec, midpoint, refZ, curFloor, curCeil);
@@ -1238,8 +1238,8 @@ class HoloGPSHandler : StaticEventHandler {
       int neighbor = adjNeighbor[ni];
       Sector nextSec = level.sectors[neighbor];
       Line ln = level.lines[adjLineIdx[ni]];
-      double nextFloor;
-      if (IsPortalPassable(endSec, nextSec, ln, player, refZ, nextFloor)) {
+      double nextFloor, nextCeil;
+      if (IsPortalPassable(endSec, nextSec, ln, player, refZ, nextFloor, nextCeil)) {
         hasPassableConnection = true;
         break;
       }
@@ -1288,9 +1288,9 @@ class HoloGPSHandler : StaticEventHandler {
 
             Sector nnSec = level.sectors[nnNeighbor];
             Line nnLn = level.lines[adjLineIdx[nni]];
-            double nnFloor;
+            double nnFloor, nnCeil;
             if (IsPortalPassable(nextSec, nnSec, nnLn, player, neighborFloor,
-                                 nnFloor)) {
+                                 nnFloor, nnCeil)) {
               neighborIsConnected = true;
               break;
             }
