@@ -519,8 +519,25 @@ class HoloGPSHandler : StaticEventHandler {
     }
   }
 
+  int GetEstimatedDatabaseSize() {
+    int totalBytes = 0;
+    for (int i = 0; i < sessionKnowledge.Size(); i++) {
+      HoloMapKnowledge knowledge = sessionKnowledge[i];
+      if (!knowledge) continue;
+
+      totalBytes += knowledge.mapName.Length();
+      totalBytes += knowledge.adjProven.Size() * 1; // 1 byte per bool
+      totalBytes += knowledge.sectorPheromone.Size() * 8; // 8 bytes per double
+      totalBytes += 64; // Object overhead estimation
+    }
+    return totalBytes;
+  }
+
   override void NetworkProcess(ConsoleEvent e) {
     if (e.Name == "purge_gps_memory") {
+      int estSize = GetEstimatedDatabaseSize();
+      double estKB = estSize / 1024.0;
+
       sessionKnowledge.Clear();
       lastPlayerSecIdx = -1;
 
@@ -533,7 +550,11 @@ class HoloGPSHandler : StaticEventHandler {
         adjProven[i] = false;
       }
 
-      Console.Printf("Holographic GPS: Memory database purged.");
+      Console.Printf("Holographic GPS: Memory database purged. Freed approx. %.2f KB.", estKB);
+    } else if (e.Name == "check_gps_memory") {
+      int estSize = GetEstimatedDatabaseSize();
+      double estKB = estSize / 1024.0;
+      Console.Printf("Holographic GPS: %d maps stored in memory database. Approx. %.2f KB saved.", sessionKnowledge.Size(), estKB);
     }
   }
 

@@ -52,6 +52,7 @@ OptionMenu "HoloGPSMenu"
     Option "Pheromone Trail Preference", "holo_gps_learning_pheromone", "OnOff"
     Option "Persistent Map Knowledge", "holo_gps_learning_persistent", "OnOff"
     Slider "Max Maps to Remember", "holo_gps_learning_limit", 1, 50, 1
+    Command "Check Memory Storage Size", "netevent check_gps_memory"
     Command "Purge GPS Learning Memory", "netevent purge_gps_memory"
 
     StaticText "" // Blank spacer line
