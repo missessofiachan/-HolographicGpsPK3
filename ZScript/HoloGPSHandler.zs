@@ -47,6 +47,19 @@ class HoloGPSHandler : StaticEventHandler
     int tickCounter;
     Array<Actor> activeMarkers;
 
+    // Consolidated reusable tracer instance
+    PathfinderTracer mTracer;
+
+    // Dynamically cached CVars to prevent continuous string lookups
+    bool cache_enabled;
+    int cache_freq;
+    bool cache_use_secrets;
+    float cache_alpha;
+    int cache_spacing;
+    int cache_max_markers;
+    bool cache_fade;
+    int cache_color;
+
     // Pathfinding result: ordered waypoints from player to target
     Array<double> pathX;
     Array<double> pathY;
@@ -69,6 +82,10 @@ class HoloGPSHandler : StaticEventHandler
         refinedX.Clear();
         refinedY.Clear();
         graphBuilt = 0;
+        
+        // Allocate single tracer instance for reuse
+        mTracer = new("PathfinderTracer");
+
         BuildAdjacencyGraph();
         FindNextObjective();
     }
@@ -78,7 +95,6 @@ class HoloGPSHandler : StaticEventHandler
         int numSectors = level.sectors.Size();
         int numLines = level.lines.Size();
 
-        // Count neighbors per sector
         Array<int> neighborCount;
         neighborCount.Resize(numSectors);
         for (int i = 0; i < numSectors; i++) neighborCount[i] = 0;
@@ -86,7 +102,7 @@ class HoloGPSHandler : StaticEventHandler
         for (int li = 0; li < numLines; li++)
         {
             Line ln = level.lines[li];
-            if (!ln.frontsector || !ln.backsector) continue;
+            if (!ln || !ln.frontsector || !ln.backsector) continue;
             
             if (ln.flags & Line.ML_BLOCKING) continue;
 
@@ -98,7 +114,6 @@ class HoloGPSHandler : StaticEventHandler
             neighborCount[bi]++;
         }
 
-        // Build prefix sum for adjStart
         adjStart.Clear();
         adjStart.Resize(numSectors + 1);
         adjStart[0] = 0;
@@ -113,7 +128,6 @@ class HoloGPSHandler : StaticEventHandler
         adjLineIdx.Clear();
         adjLineIdx.Resize(totalAdj);
 
-        // Fill adjacency data
         Array<int> fillPos;
         fillPos.Resize(numSectors);
         for (int i = 0; i < numSectors; i++) fillPos[i] = adjStart[i];
@@ -121,12 +135,9 @@ class HoloGPSHandler : StaticEventHandler
         for (int li = 0; li < numLines; li++)
         {
             Line ln = level.lines[li];
-            if (!ln.frontsector || !ln.backsector) continue;
+            if (!ln || !ln.frontsector || !ln.backsector) continue;
             
             if (ln.flags & Line.ML_BLOCKING) continue;
-
-            bool useSecrets = CVar.GetCVar("holo_gps_use_secrets", players[consoleplayer]).GetBool();
-            if (!useSecrets && (ln.flags & Line.ML_SECRET)) continue;
 
             int fi = ln.frontsector.sectornum;
             int bi = ln.backsector.sectornum;
@@ -146,16 +157,24 @@ class HoloGPSHandler : StaticEventHandler
 
     override void WorldTick()
     {
-        if (!CVar.GetCVar("holo_gps_enabled", players[consoleplayer]).GetBool())
-            return;
-
-        tickCounter++;
-        int currentFreq = CVar.GetCVar("holo_gps_freq", players[consoleplayer]).GetInt();
-        if (currentFreq < 1) currentFreq = 1;
-        if (tickCounter % currentFreq != 0) return;
-
         PlayerInfo plyr = players[consoleplayer];
         if (!plyr || !plyr.mo || plyr.mo.health <= 0) return;
+
+        // Populate dynamic CVar cache once per frame tick
+        cache_enabled = CVar.GetCVar("holo_gps_enabled", plyr).GetBool();
+        cache_freq = CVar.GetCVar("holo_gps_freq", plyr).GetInt();
+        cache_use_secrets = CVar.GetCVar("holo_gps_use_secrets", plyr).GetBool();
+        cache_alpha = CVar.GetCVar("holo_gps_alpha", plyr).GetFloat();
+        cache_spacing = CVar.GetCVar("holo_gps_spacing", plyr).GetInt();
+        cache_max_markers = CVar.GetCVar("holo_gps_max_markers", plyr).GetInt();
+        cache_fade = CVar.GetCVar("holo_gps_fade", plyr).GetBool();
+        cache_color = CVar.GetCVar("holo_gps_color", plyr).GetInt();
+
+        if (!cache_enabled) return;
+
+        tickCounter++;
+        if (cache_freq < 1) cache_freq = 1;
+        if (tickCounter % cache_freq != 0) return;
 
         if (currentTarget)
         {
@@ -200,7 +219,7 @@ class HoloGPSHandler : StaticEventHandler
         PlayerInfo plyr = players[consoleplayer];
         if (!plyr || !plyr.mo) return;
 
-        // 1. First Pass: Look for any valid, REACHABLE keys
+        // Pass 1: Find valid, reachable Keys
         ThinkerIterator it = ThinkerIterator.Create("Key");
         Key mapKey;
         while (mapKey = Key(it.Next()))
@@ -216,7 +235,7 @@ class HoloGPSHandler : StaticEventHandler
             }
         }
 
-        // 2. Second Pass Fallback: If no keys are reachable, route directly to the exits
+        // Pass 2 Fallback: If keys are unreachable, target level exits
         Array<Actor> exitSpots;
         for (int i = 0; i < level.lines.Size(); i++)
         {
@@ -224,7 +243,10 @@ class HoloGPSHandler : StaticEventHandler
             if (ln && (ln.special == 243 || ln.special == 244 || ln.special == 74 || ln.special == 124))
             {
                 Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
-                double z = level.PointInSector(midpoint).floorplane.ZatPoint(midpoint);
+                Sector exitSec = level.PointInSector(midpoint);
+                if (!exitSec) continue; // Boundary check prevention
+
+                double z = exitSec.floorplane.ZatPoint(midpoint);
                 Actor spot = Actor.Spawn("MapSpot", (midpoint.x, midpoint.y, z));
                 if (spot) exitSpots.Push(spot);
             }
@@ -260,9 +282,7 @@ class HoloGPSHandler : StaticEventHandler
         if (!ln || !curSec || !nextSec) return false;
 
         if (ln.flags & Line.ML_BLOCKING) return false;
-
-        bool useSecrets = CVar.GetCVar("holo_gps_use_secrets", players[consoleplayer]).GetBool();
-        if (!useSecrets && (ln.flags & Line.ML_SECRET)) return false;
+        if (!cache_use_secrets && (ln.flags & Line.ML_SECRET)) return false;
 
         Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
         double curFloor = curSec.floorplane.ZatPoint(midpoint);
@@ -304,7 +324,7 @@ class HoloGPSHandler : StaticEventHandler
 
     bool IsPlayerTriggerable(Line ln)
     {
-        if (ln.special == 0) return false;
+        if (!ln || ln.special == 0) return false;
         int act = ln.activation;
         if (act & (SPAC_Use | SPAC_UseThrough | SPAC_Cross | SPAC_Impact | SPAC_Push | SPAC_AnyCross))
         {
@@ -318,18 +338,20 @@ class HoloGPSHandler : StaticEventHandler
         pathX.Clear();
         pathY.Clear();
 
-        if (graphBuilt == 0) return;
+        if (graphBuilt == 0 || !player || !target) return;
 
         int numSectors = level.sectors.Size();
 
         Sector startSec = level.PointInSector(player.pos.xy);
         Sector endSec = level.PointInSector(target.pos.xy);
 
+        // Boundary Check Prevention
+        if (!startSec || !endSec) return;
+
         int startIdx = startSec.sectornum;
         int endIdx = endSec.sectornum;
 
-        // FIX: If the target sector is completely isolated (like a decorative table or pedestal),
-        // look through adjacent lines to shift the target node onto the surrounding floor sector.
+        // Localized Structural Proximity Targeting For Shared/Isolated Sectors
         int realEndIdx = endIdx;
         if (adjStart[realEndIdx] == adjStart[realEndIdx + 1])
         {
@@ -339,12 +361,14 @@ class HoloGPSHandler : StaticEventHandler
                 Line ln = level.lines[i];
                 if (!ln || (!ln.frontsector && !ln.backsector)) continue;
                 
+                Vector2 lineMid = (ln.v1.p + ln.v2.p) / 2.0;
+                double d = (lineMid - target.pos.xy).Length(); 
+
                 if (ln.frontsector && ln.frontsector.sectornum == endIdx && ln.backsector)
                 {
                     int bIdx = ln.backsector.sectornum;
                     if (adjStart[bIdx] != adjStart[bIdx + 1]) 
                     {
-                        double d = (ln.backsector.centerspot - target.pos.xy).Length();
                         if (d < closestDist) { closestDist = d; realEndIdx = bIdx; }
                     }
                 }
@@ -353,7 +377,6 @@ class HoloGPSHandler : StaticEventHandler
                     int fIdx = ln.frontsector.sectornum;
                     if (adjStart[fIdx] != adjStart[fIdx + 1])
                     {
-                        double d = (ln.frontsector.centerspot - target.pos.xy).Length();
                         if (d < closestDist) { closestDist = d; realEndIdx = fIdx; }
                     }
                 }
@@ -367,7 +390,6 @@ class HoloGPSHandler : StaticEventHandler
             return;
         }
 
-        // Pass 1: Forward A* Search
         Array<int> parent;
         Array<int> parentLine;
         Array<int> reachable;
@@ -483,7 +505,7 @@ class HoloGPSHandler : StaticEventHandler
             return;
         }
 
-        // Pass 2: Reverse topological fallback finding the barrier sector
+        // Pass 2 Fallback: Reverse tracking setup for structural blockers
         Array<int> visitedReverse;
         Array<int> queueReverse;
 
@@ -612,14 +634,14 @@ class HoloGPSHandler : StaticEventHandler
 
     bool PathIsBlocked(Vector2 start, Vector2 end)
     {
+        // Reused instance verification
+        if (!mTracer) return false;
+
         double floorzA = GetFloorZ(start);
         double floorzB = GetFloorZ(end);
 
         Vector3 pA = (start.x, start.y, floorzA + 16.0);
         Vector3 pB = (end.x, end.y, floorzB + 16.0);
-
-        PathfinderTracer tracer = new("PathfinderTracer");
-        if (!tracer) return false;
 
         Vector3 diff = pB - pA;
         double len = diff.Length();
@@ -629,8 +651,8 @@ class HoloGPSHandler : StaticEventHandler
         Sector sec = level.PointInSector(start);
         if (!sec) return false;
 
-        tracer.Trace(pA, sec, dir, len, TRACE_ReportPortals, 0xFFFFFFFF, true);
-        return tracer.Results.HitType != TRACE_HitNone;
+        mTracer.Trace(pA, sec, dir, len, TRACE_ReportPortals, 0xFFFFFFFF, true);
+        return mTracer.Results.HitType != TRACE_HitNone;
     }
 
     double GetPathDist(Vector2 start, in out Array<double> px, in out Array<double> py, Vector2 end)
@@ -657,16 +679,13 @@ class HoloGPSHandler : StaticEventHandler
 
     bool GetDetourPath(Vector2 A, Vector2 B, in out Array<double> outX, in out Array<double> outY, int depth = 0)
     {
-        if (depth > 3) return false;
+        if (depth > 3 || !mTracer) return false;
 
         double floorzA = GetFloorZ(A);
         double floorzB = GetFloorZ(B);
 
         Vector3 start = (A.x, A.y, floorzA + 16.0);
         Vector3 end = (B.x, B.y, floorzB + 16.0);
-
-        PathfinderTracer tracer = new("PathfinderTracer");
-        if (!tracer) return false;
 
         Vector3 diff = end - start;
         double len = diff.Length();
@@ -676,10 +695,10 @@ class HoloGPSHandler : StaticEventHandler
         Sector sec = level.PointInSector(A);
         if (!sec) return false;
 
-        tracer.Trace(start, sec, dir, len, TRACE_ReportPortals, 0xFFFFFFFF, true);
-        if (tracer.Results.HitType == TRACE_HitNone) return true;
+        mTracer.Trace(start, sec, dir, len, TRACE_ReportPortals, 0xFFFFFFFF, true);
+        if (mTracer.Results.HitType == TRACE_HitNone) return true;
 
-        Line hitLn = tracer.Results.HitLine;
+        Line hitLn = mTracer.Results.HitLine;
         if (!hitLn) return false;
 
         Vector2 lnDir = (hitLn.v2.p - hitLn.v1.p).Unit();
@@ -776,19 +795,11 @@ class HoloGPSHandler : StaticEventHandler
 
     void SpawnPathMarkers(Actor player)
     {
-        if (refinedX.Size() == 0) return;
+        if (refinedX.Size() == 0 || !player) return;
 
-        float userAlpha = CVar.GetCVar("holo_gps_alpha", players[consoleplayer]).GetFloat();
-        if (userAlpha <= 0.0) userAlpha = 0.6;
-
-        int spacing = CVar.GetCVar("holo_gps_spacing", players[consoleplayer]).GetInt();
-        if (spacing < 32) spacing = 32;
-
-        int maxMarkers = CVar.GetCVar("holo_gps_max_markers", players[consoleplayer]).GetInt();
-        if (maxMarkers < 1) maxMarkers = 1;
-
-        bool fadeEnabled = CVar.GetCVar("holo_gps_fade", players[consoleplayer]).GetBool();
-        int colorMode = CVar.GetCVar("holo_gps_color", players[consoleplayer]).GetInt();
+        if (cache_alpha <= 0.0) cache_alpha = 0.6;
+        if (cache_spacing < 32) cache_spacing = 32;
+        if (cache_max_markers < 1) cache_max_markers = 1;
 
         Vector2 prevPoint = player.pos.xy;
         Vector2 lastSpawnPos = player.pos.xy;
@@ -796,7 +807,7 @@ class HoloGPSHandler : StaticEventHandler
 
         for (int wp = 0; wp < refinedX.Size(); wp++)
         {
-            if (spawnedCount >= maxMarkers) break;
+            if (spawnedCount >= cache_max_markers) break;
             
             Vector2 waypoint = (refinedX[wp], refinedY[wp]);
             Vector2 seg = waypoint - prevPoint;
@@ -808,7 +819,7 @@ class HoloGPSHandler : StaticEventHandler
                 continue;
             }
 
-            int segSteps = int(segLen / spacing);
+            int segSteps = int(segLen / cache_spacing);
             if (segSteps < 1) segSteps = 1;
 
             Vector2 stepDir = seg / segLen;
@@ -816,9 +827,9 @@ class HoloGPSHandler : StaticEventHandler
 
             for (int i = 1; i <= segSteps; i++)
             {
-                if (spawnedCount >= maxMarkers) break;
+                if (spawnedCount >= cache_max_markers) break;
                 
-                Vector2 spawnXY = prevPoint + stepDir * (spacing * i);
+                Vector2 spawnXY = prevPoint + stepDir * (cache_spacing * i);
 
                 if ((spawnXY - prevPoint).Length() > segLen)
                     spawnXY = waypoint;
@@ -829,21 +840,24 @@ class HoloGPSHandler : StaticEventHandler
                     continue; 
                 }
 
-                double floorz = level.PointInSector(spawnXY).floorplane.ZatPoint(spawnXY);
+                Sector spawnSec = level.PointInSector(spawnXY);
+                if (!spawnSec) continue; // Boundary check prevention
+
+                double floorz = spawnSec.floorplane.ZatPoint(spawnXY);
                 Vector3 spawnPos = (spawnXY.x, spawnXY.y, floorz + 1.0);
 
                 Actor marker = Actor.Spawn("HoloPathMarker", spawnPos);
                 if (marker)
                 {
-                    double markerAlpha = userAlpha;
-                    if (fadeEnabled)
+                    double markerAlpha = cache_alpha;
+                    if (cache_fade)
                     {
-                        markerAlpha = userAlpha * (1.0 - (double(spawnedCount) / double(maxMarkers)));
+                        markerAlpha = cache_alpha * (1.0 - (double(spawnedCount) / double(cache_max_markers)));
                     }
 
                     marker.angle = arrowAngle;
 
-                    if (colorMode == 9) // Trans Pride
+                    if (cache_color == 9) // Trans Pride
                     {
                         int cycleStep = spawnedCount % 4;
                         color transCol = 0xFFFFFF; 
@@ -853,17 +867,17 @@ class HoloGPSHandler : StaticEventHandler
                         marker.A_SetRenderStyle(markerAlpha, STYLE_AddStencil);
                         marker.SetShade(transCol);
                     }
-                    else if (colorMode > 0)
+                    else if (cache_color > 0)
                     {
                         color col = 0xFFFFFF;
-                        if (colorMode == 1) col = 0xFF0000;      
-                        else if (colorMode == 2) col = 0x00FF00; 
-                        else if (colorMode == 3) col = 0x0000FF; 
-                        else if (colorMode == 4) col = 0xFFFF00; 
-                        else if (colorMode == 5) col = 0xFF8000; 
-                        else if (colorMode == 6) col = 0x8000FF; 
-                        else if (colorMode == 7) col = 0xFF00FF; 
-                        else if (colorMode == 8) col = 0xFFFFFF; 
+                        if (cache_color == 1) col = 0xFF0000;      
+                        else if (cache_color == 2) col = 0x00FF00; 
+                        else if (cache_color == 3) col = 0x0000FF; 
+                        else if (cache_color == 4) col = 0xFFFF00; 
+                        else if (cache_color == 5) col = 0xFF8000; 
+                        else if (cache_color == 6) col = 0x8000FF; 
+                        else if (cache_color == 7) col = 0xFF00FF; 
+                        else if (cache_color == 8) col = 0xFFFFFF; 
                         
                         marker.A_SetRenderStyle(markerAlpha, STYLE_AddStencil);
                         marker.SetShade(col);
@@ -878,7 +892,7 @@ class HoloGPSHandler : StaticEventHandler
                     lastSpawnPos = spawnXY;
                 }
             }
-            if (spawnedCount >= maxMarkers) break;
+            if (spawnedCount >= cache_max_markers) break;
             prevPoint = waypoint;
         }
     }
