@@ -50,6 +50,22 @@ class HoloGPSHandler : StaticEventHandler
     // Consolidated reusable tracer instance to avoid garbage collector load
     PathfinderTracer mTracer;
 
+    // Cached CVar references to completely bypass tick-based string hash lookups
+    CVar cv_enabled;
+    CVar cv_freq;
+    CVar cv_use_secrets;
+    CVar cv_alpha;
+    CVar cv_spacing;
+    CVar cv_max_markers;
+    CVar cv_fade;
+    CVar cv_color;
+    CVar cv_scale;
+    CVar cv_height;
+    CVar cv_priority;
+    CVar cv_style;
+    CVar cv_extended_search;
+    CVar cv_wolfendoom_compat;
+
     // Dynamically cached CVars to bypass continuous string lookups
     bool cache_enabled;
     int cache_freq;
@@ -66,6 +82,19 @@ class HoloGPSHandler : StaticEventHandler
     bool cache_extended_search;
     bool cache_wolfendoom_compat;
 
+    // Persistent helper arrays to avoid garbage collector thrashing
+    Array<int> parent;
+    Array<int> parentLine;
+    Array<int> reachable;
+    Array<double> gScore;
+    Array<double> fScore;
+    Array<int> openSet;
+    Array<bool> inOpenSet;
+
+    // Persistent helper arrays for reverse topological fallback search
+    Array<int> visitedReverse;
+    Array<int> queueReverse;
+
     // Pathfinding result: ordered waypoints from player to target
     Array<double> pathX;
     Array<double> pathY;
@@ -77,6 +106,10 @@ class HoloGPSHandler : StaticEventHandler
     Array<int> adjNeighbor;
     Array<int> adjLineIdx;
     int graphBuilt;
+
+    // Sprite cache for WolfenDoom key compatibility checks
+    SpriteID ykeySprite, bkeySprite, rkeySprite, gkeySprite, skeySprite;
+    bool spritesCached;
 
     override void WorldLoaded(WorldEvent e)
     {
@@ -90,6 +123,13 @@ class HoloGPSHandler : StaticEventHandler
         graphBuilt = 0;
         
         mTracer = new("PathfinderTracer");
+
+        ykeySprite = Actor.GetSpriteIndex("YKEY");
+        bkeySprite = Actor.GetSpriteIndex("BKEY");
+        rkeySprite = Actor.GetSpriteIndex("RKEY");
+        gkeySprite = Actor.GetSpriteIndex("GKEY");
+        skeySprite = Actor.GetSpriteIndex("SKEY");
+        spritesCached = true;
 
         BuildAdjacencyGraph();
         FindNextObjective();
@@ -160,26 +200,47 @@ class HoloGPSHandler : StaticEventHandler
         graphBuilt = 1;
     }
 
+    void InitCVars(PlayerInfo plyr)
+    {
+        if (cv_enabled) return;
+        cv_enabled = CVar.GetCVar("holo_gps_enabled", plyr);
+        cv_freq = CVar.GetCVar("holo_gps_freq", plyr);
+        cv_use_secrets = CVar.GetCVar("holo_gps_use_secrets", plyr);
+        cv_alpha = CVar.GetCVar("holo_gps_alpha", plyr);
+        cv_spacing = CVar.GetCVar("holo_gps_spacing", plyr);
+        cv_max_markers = CVar.GetCVar("holo_gps_max_markers", plyr);
+        cv_fade = CVar.GetCVar("holo_gps_fade", plyr);
+        cv_color = CVar.GetCVar("holo_gps_color", plyr);
+        cv_scale = CVar.GetCVar("holo_gps_scale", plyr);
+        cv_height = CVar.GetCVar("holo_gps_height", plyr);
+        cv_priority = CVar.GetCVar("holo_gps_priority", plyr);
+        cv_style = CVar.GetCVar("holo_gps_style", plyr);
+        cv_extended_search = CVar.GetCVar("holo_gps_extended_search", plyr);
+        cv_wolfendoom_compat = CVar.GetCVar("holo_gps_wolfendoom_compat", plyr);
+    }
+
     override void WorldTick()
     {
         PlayerInfo plyr = players[consoleplayer];
         if (!plyr || !plyr.mo || plyr.mo.health <= 0) return;
 
+        InitCVars(plyr);
+
         // Dynamic CVar lookup cache refresh (bypasses deep string hashing)
-        cache_enabled = CVar.GetCVar("holo_gps_enabled", plyr).GetBool();
-        cache_freq = CVar.GetCVar("holo_gps_freq", plyr).GetInt();
-        cache_use_secrets = CVar.GetCVar("holo_gps_use_secrets", plyr).GetBool();
-        cache_alpha = CVar.GetCVar("holo_gps_alpha", plyr).GetFloat();
-        cache_spacing = CVar.GetCVar("holo_gps_spacing", plyr).GetInt();
-        cache_max_markers = CVar.GetCVar("holo_gps_max_markers", plyr).GetInt();
-        cache_fade = CVar.GetCVar("holo_gps_fade", plyr).GetBool();
-        cache_color = CVar.GetCVar("holo_gps_color", plyr).GetInt();
-        cache_scale = CVar.GetCVar("holo_gps_scale", plyr).GetFloat();
-        cache_height = CVar.GetCVar("holo_gps_height", plyr).GetFloat();
-        cache_priority = CVar.GetCVar("holo_gps_priority", plyr).GetInt();
-        cache_style = CVar.GetCVar("holo_gps_style", plyr).GetInt();
-        cache_extended_search = CVar.GetCVar("holo_gps_extended_search", plyr).GetBool();
-        cache_wolfendoom_compat = CVar.GetCVar("holo_gps_wolfendoom_compat", plyr).GetBool();
+        cache_enabled = cv_enabled.GetBool();
+        cache_freq = cv_freq.GetInt();
+        cache_use_secrets = cv_use_secrets.GetBool();
+        cache_alpha = cv_alpha.GetFloat();
+        cache_spacing = cv_spacing.GetInt();
+        cache_max_markers = cv_max_markers.GetInt();
+        cache_fade = cv_fade.GetBool();
+        cache_color = cv_color.GetInt();
+        cache_scale = cv_scale.GetFloat();
+        cache_height = cv_height.GetFloat();
+        cache_priority = cv_priority.GetInt();
+        cache_style = cv_style.GetInt();
+        cache_extended_search = cv_extended_search.GetBool();
+        cache_wolfendoom_compat = cv_wolfendoom_compat.GetBool();
 
         if (!cache_enabled) return;
 
@@ -264,12 +325,7 @@ class HoloGPSHandler : StaticEventHandler
 
                 if (!isKey && cache_wolfendoom_compat && mapKey.bSPECIAL)
                 {
-                    SpriteID ykey = Actor.GetSpriteIndex("YKEY");
-                    SpriteID bkey = Actor.GetSpriteIndex("BKEY");
-                    SpriteID rkey = Actor.GetSpriteIndex("RKEY");
-                    SpriteID gkey = Actor.GetSpriteIndex("GKEY");
-                    SpriteID skey = Actor.GetSpriteIndex("SKEY");
-                    if (mapKey.sprite == ykey || mapKey.sprite == bkey || mapKey.sprite == rkey || mapKey.sprite == gkey || mapKey.sprite == skey)
+                    if (mapKey.sprite == ykeySprite || mapKey.sprite == bkeySprite || mapKey.sprite == rkeySprite || mapKey.sprite == gkeySprite || mapKey.sprite == skeySprite)
                     {
                         isKey = true;
                     }
@@ -412,20 +468,13 @@ class HoloGPSHandler : StaticEventHandler
             return;
         }
 
-        Array<int> parent;
-        Array<int> parentLine;
-        Array<int> reachable;
-        Array<double> gScore;
-        Array<double> fScore;
-        Array<int> openSet;
-        Array<bool> inOpenSet;
-
         parent.Resize(numSectors);
         parentLine.Resize(numSectors);
         reachable.Resize(numSectors);
         gScore.Resize(numSectors);
         fScore.Resize(numSectors);
         inOpenSet.Resize(numSectors);
+        openSet.Clear();
 
         for (int i = 0; i < numSectors; i++)
         {
@@ -612,12 +661,10 @@ class HoloGPSHandler : StaticEventHandler
         }
 
         // Pass 3: Reverse topological fallback finding the barrier sector
-        Array<int> visitedReverse;
-        Array<int> queueReverse;
-
         visitedReverse.Resize(numSectors);
         for (int i = 0; i < numSectors; i++) visitedReverse[i] = 0;
 
+        queueReverse.Clear();
         visitedReverse[endIdx] = 1;
         queueReverse.Push(endIdx);
 
