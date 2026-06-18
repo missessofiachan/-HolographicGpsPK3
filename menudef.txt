@@ -1,0 +1,46 @@
+// Hook into GZDoom's main options screen
+OptionMenu "OptionsMenu"
+{
+    Submenu "Holographic GPS Options", "HoloGPSMenu"
+}
+
+OptionValue "HoloGPSColorList"
+{
+    0, "Default (Cyan)"
+    1, "Red"
+    2, "Green"
+    3, "Blue"
+    4, "Yellow"
+    5, "Orange"
+    6, "Purple"
+    7, "Pink"
+    8, "White"
+    9, "Trans Pride"
+}
+
+// Define our custom settings menu
+OptionMenu "HoloGPSMenu"
+{
+    Title "HOLOGRAPHIC GPS CONFIG"
+
+    // Master Switch
+    Option "Enable Navigation Path", "holo_gps_enabled", "OnOff"
+    Option "Route Through Secret Doors", "holo_gps_use_secrets", "OnOff"
+
+    StaticText "" // Blank spacer line
+
+    // Path Density & Performance Tuning
+    Slider "Marker Spacing (Units)", "holo_gps_spacing", 32, 256, 16
+    Slider "Update Interval (Ticks)", "holo_gps_freq", 1, 35, 1
+    Slider "Trail Length (Markers)", "holo_gps_max_markers", 1, 32, 1
+
+    StaticText "" // Blank spacer line
+    StaticText "Performance Note: Higher interval reduces lag on massive maps.", 1
+    StaticText ""
+
+    // Visual Settings
+    Slider "Hologram Opacity", "holo_gps_alpha", 0.1, 1.0, 0.1
+    Option "Fade Distant Markers", "holo_gps_fade", "OnOff"
+    Option "Trail Color", "holo_gps_color", "HoloGPSColorList"
+}
+

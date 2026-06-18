@@ -1,0 +1,9 @@
+// User settings saved to their main config file
+user bool   holo_gps_enabled = true;      // Master switch
+user int    holo_gps_spacing = 64;        // Distance between path markers
+user int    holo_gps_freq = 5;            // Update frequency (in engine ticks)
+user float  holo_gps_alpha = 0.6;         // Transparency/Glow intensity
+user bool   holo_gps_use_secrets = false; // Route through secret doors
+user int    holo_gps_max_markers = 12;    // Maximum number of arrows to draw
+user bool   holo_gps_fade = true;         // Fade out distant arrows
+user int    holo_gps_color = 0;           // Trail color: 0=Default, 1-8=Custom, 9=Trans Pride
