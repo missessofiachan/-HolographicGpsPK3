@@ -49,12 +49,12 @@ class PathfinderTracer : LineTracer
                     HoloGPSHandler.GetEffectiveFloorCeil(front, hitPt, Results.HitPos.z, fFloor, fCeil);
                     HoloGPSHandler.GetEffectiveFloorCeil(back, destHitPt, Results.HitPos.z, bFloor, bCeil);
 
-                    if ((fCeil - fFloor < HoloGPSHandler.CLEARANCE_MIN) || (bCeil - bFloor < HoloGPSHandler.CLEARANCE_MIN))
+                    if ((fCeil - fFloor < 56.0) || (bCeil - bFloor < 56.0))
                     {
                         return TRACE_Stop;
                     }
 
-                    if ((fFloor - bFloor > HoloGPSHandler.STEP_HEIGHT_MAX) || (bFloor - fFloor > HoloGPSHandler.STEP_HEIGHT_MAX))
+                    if ((fFloor - bFloor > 24.0) || (bFloor - fFloor > 24.0))
                     {
                         return TRACE_Stop;
                     }

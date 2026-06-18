@@ -21,6 +21,21 @@ user bool   holo_gps_raycast_detouring = true;
 user bool   holo_gps_learning_proven = true;
 user bool   holo_gps_learning_pheromone = true;
 user bool   holo_gps_learning_persistent = true;
+user bool   holo_gps_learning_heuristics = true;
+
+// Speedrun Heuristics
+user bool   holo_gps_sr_momentum = false;
+user bool   holo_gps_sr_door_penalty = false;
+user bool   holo_gps_sr_monster_avoidance = false;
+user bool   holo_gps_sr_clearance = false;
+user bool   holo_gps_sr_reckless = false;
+
+// Advanced Engine Constants
+user float  holo_gps_clearance_min = 56.0;
+user float  holo_gps_step_max = 24.0;
+user float  holo_gps_weight_doors = 500.0;
+user float  holo_gps_weight_monsters = 80.0;
+user float  holo_gps_weight_momentum = 150.0;
 
 // Core Pathfinder Features
 user bool   holo_gps_3dfloors = true;

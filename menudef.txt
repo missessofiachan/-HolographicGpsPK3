@@ -51,9 +51,18 @@ OptionMenu "HoloGPSMenu"
     Option "Proven Transition Learning", "holo_gps_learning_proven", "OnOff"
     Option "Pheromone Trail Preference", "holo_gps_learning_pheromone", "OnOff"
     Option "Persistent Map Knowledge", "holo_gps_learning_persistent", "OnOff"
+    Option "Global Heuristic Learning", "holo_gps_learning_heuristics", "OnOff"
     Slider "Max Maps to Remember", "holo_gps_learning_limit", 1, 200, 1
     Command "Check Memory Storage Size", "netevent check_gps_memory"
     Command "Purge GPS Learning Memory", "netevent purge_gps_memory"
+
+    StaticText "" // Blank spacer line
+    StaticText "Speedrunner Heuristics", 1
+    Option "Momentum Preservation", "holo_gps_sr_momentum", "OnOff"
+    Option "Door & Lift Avoidance", "holo_gps_sr_door_penalty", "OnOff"
+    Option "Monster Density Avoidance", "holo_gps_sr_monster_avoidance", "OnOff"
+    Option "Strafe-Jump Clearance", "holo_gps_sr_clearance", "OnOff"
+    Option "Reckless Damage Boosting", "holo_gps_sr_reckless", "OnOff"
 
     StaticText "" // Blank spacer line
     StaticText "Core Features & Performance", 1
@@ -61,6 +70,14 @@ OptionMenu "HoloGPSMenu"
     Option "Portal Navigation Support", "holo_gps_portals", "OnOff"
     Option "Switch & Lock Solver Fallback", "holo_gps_solve_switches", "OnOff"
     Option "Path Corner Smoothing", "holo_gps_smoothing", "OnOff"
+
+    StaticText "" // Blank spacer line
+    StaticText "Advanced Engine Tuning", 1
+    Slider "Minimum Clearance (Units)", "holo_gps_clearance_min", 24.0, 128.0, 4.0
+    Slider "Maximum Step Height", "holo_gps_step_max", 0.0, 64.0, 2.0
+    Slider "Door Wait Penalty", "holo_gps_weight_doors", 0.0, 1000.0, 50.0
+    Slider "Monster Density Penalty", "holo_gps_weight_monsters", 0.0, 500.0, 10.0
+    Slider "Sharp Turn Penalty", "holo_gps_weight_momentum", 0.0, 500.0, 10.0
 
     StaticText "" // Blank spacer line
 
@@ -84,5 +101,5 @@ OptionMenu "HoloGPSMenu"
     StaticText "" // Blank spacer line
     
     // Restore Defaults Button
-    Command "Restore Default Settings", "reset holo_gps_enabled; reset holo_gps_priority; reset holo_gps_extended_search; reset holo_gps_wolfendoom_compat; reset holo_gps_use_secrets; reset holo_gps_spacing; reset holo_gps_freq; reset holo_gps_max_markers; reset holo_gps_scale; reset holo_gps_height; reset holo_gps_alpha; reset holo_gps_fade; reset holo_gps_color; reset holo_gps_style; reset holo_gps_hazard_avoidance; reset holo_gps_target_snapping; reset holo_gps_raycast_detouring; reset holo_gps_learning_proven; reset holo_gps_learning_pheromone; reset holo_gps_learning_persistent; reset holo_gps_3dfloors; reset holo_gps_portals; reset holo_gps_solve_switches; reset holo_gps_smoothing; reset holo_gps_learning_limit"
+    Command "Restore Default Settings", "reset holo_gps_enabled; reset holo_gps_priority; reset holo_gps_extended_search; reset holo_gps_wolfendoom_compat; reset holo_gps_use_secrets; reset holo_gps_spacing; reset holo_gps_freq; reset holo_gps_max_markers; reset holo_gps_scale; reset holo_gps_height; reset holo_gps_alpha; reset holo_gps_fade; reset holo_gps_color; reset holo_gps_style; reset holo_gps_hazard_avoidance; reset holo_gps_target_snapping; reset holo_gps_raycast_detouring; reset holo_gps_learning_proven; reset holo_gps_learning_pheromone; reset holo_gps_learning_persistent; reset holo_gps_learning_heuristics; reset holo_gps_sr_momentum; reset holo_gps_sr_door_penalty; reset holo_gps_sr_monster_avoidance; reset holo_gps_sr_clearance; reset holo_gps_sr_reckless; reset holo_gps_clearance_min; reset holo_gps_step_max; reset holo_gps_weight_doors; reset holo_gps_weight_monsters; reset holo_gps_weight_momentum; reset holo_gps_3dfloors; reset holo_gps_portals; reset holo_gps_solve_switches; reset holo_gps_smoothing; reset holo_gps_learning_limit"
 }
