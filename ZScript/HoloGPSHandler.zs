@@ -362,8 +362,13 @@ class HoloGPSHandler : StaticEventHandler {
 
     BuildAdjacencyGraph();
 
-    string currentMap = level.MapName.MakeLower();
-    lastMapName = GetMapHash();
+    string currentMap = GetMapHash();
+    lastMapName = currentMap;
+
+    if (plyr) {
+      CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyr);
+      if (cvBlob) DeserializeLearningData(cvBlob.GetString());
+    }
 
     int numSectors = level.sectors.Size();
     sectorPheromone.Clear();
@@ -779,12 +784,13 @@ class HoloGPSHandler : StaticEventHandler {
       }
       int totalAdj = adjProven.Size();
       for (int i = 0; i < totalAdj; i++) {
-      adjProven[i] = false;
-    }
-    if (plyr) {
-      CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyr);
-      if (cvBlob) DeserializeLearningData(cvBlob.GetString());
-    }
+        adjProven[i] = false;
+      }
+      PlayerInfo plyrInfo = players[consoleplayer];
+      if (plyrInfo) {
+        CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyrInfo);
+        if (cvBlob) cvBlob.SetString("");
+      }
 
       Console.Printf("Holographic GPS: Memory database purged. Freed approx. %.2f KB.", estKB);
     } else if (e.Name == "check_gps_memory") {
