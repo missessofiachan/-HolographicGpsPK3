@@ -15,13 +15,25 @@ class PathfinderTracer : LineTracer
 
                 Sector front = Results.HitLine.frontsector;
                 Sector back = Results.HitLine.backsector;
+                Vector2 hitPt = Results.HitPos.xy;
+                Vector2 destHitPt = hitPt;
+
+                if (Results.HitLine.isLinePortal())
+                {
+                    Line dest = Results.HitLine.getPortalDestination();
+                    if (dest)
+                    {
+                        back = dest.frontsector;
+                        destHitPt = hitPt + Results.HitLine.getPortalDisplacement();
+                    }
+                }
+
                 if (front && back)
                 {
-                    Vector2 hitPt = Results.HitPos.xy;
                     double fFloor = front.floorplane.ZatPoint(hitPt);
                     double fCeil = front.ceilingplane.ZatPoint(hitPt);
-                    double bFloor = back.floorplane.ZatPoint(hitPt);
-                    double bCeil = back.ceilingplane.ZatPoint(hitPt);
+                    double bFloor = back.floorplane.ZatPoint(destHitPt);
+                    double bCeil = back.ceilingplane.ZatPoint(destHitPt);
 
                     if ((fCeil - fFloor < HoloGPSHandler.CLEARANCE_MIN) || (bCeil - bFloor < HoloGPSHandler.CLEARANCE_MIN))
                     {
@@ -199,16 +211,34 @@ class HoloGPSHandler : StaticEventHandler
         for (int li = 0; li < numLines; li++)
         {
             Line ln = level.lines[li];
-            if (!ln || !ln.frontsector || !ln.backsector) continue;
-            
-            if (ln.flags & Line.ML_BLOCKING) continue;
+            if (!ln) continue;
 
-            int fi = ln.frontsector.sectornum;
-            int bi = ln.backsector.sectornum;
-            if (fi == bi) continue;
+            if (ln.isLinePortal())
+            {
+                Line dest = ln.getPortalDestination();
+                if (dest && ln.frontsector && dest.frontsector)
+                {
+                    int fi = ln.frontsector.sectornum;
+                    int bi = dest.frontsector.sectornum;
+                    if (fi != bi)
+                    {
+                        neighborCount[fi]++;
+                        neighborCount[bi]++;
+                    }
+                }
+            }
+            else
+            {
+                if (!ln.frontsector || !ln.backsector) continue;
+                if (ln.flags & Line.ML_BLOCKING) continue;
 
-            neighborCount[fi]++;
-            neighborCount[bi]++;
+                int fi = ln.frontsector.sectornum;
+                int bi = ln.backsector.sectornum;
+                if (fi == bi) continue;
+
+                neighborCount[fi]++;
+                neighborCount[bi]++;
+            }
         }
 
         adjStart.Clear();
@@ -232,21 +262,44 @@ class HoloGPSHandler : StaticEventHandler
         for (int li = 0; li < numLines; li++)
         {
             Line ln = level.lines[li];
-            if (!ln || !ln.frontsector || !ln.backsector) continue;
-            
-            if (ln.flags & Line.ML_BLOCKING) continue;
+            if (!ln) continue;
 
-            int fi = ln.frontsector.sectornum;
-            int bi = ln.backsector.sectornum;
-            if (fi == bi) continue;
+            if (ln.isLinePortal())
+            {
+                Line dest = ln.getPortalDestination();
+                if (dest && ln.frontsector && dest.frontsector)
+                {
+                    int fi = ln.frontsector.sectornum;
+                    int bi = dest.frontsector.sectornum;
+                    if (fi != bi)
+                    {
+                        adjNeighbor[fillPos[fi]] = bi;
+                        adjLineIdx[fillPos[fi]] = li;
+                        fillPos[fi]++;
 
-            adjNeighbor[fillPos[fi]] = bi;
-            adjLineIdx[fillPos[fi]] = li;
-            fillPos[fi]++;
+                        adjNeighbor[fillPos[bi]] = fi;
+                        adjLineIdx[fillPos[bi]] = li;
+                        fillPos[bi]++;
+                    }
+                }
+            }
+            else
+            {
+                if (!ln.frontsector || !ln.backsector) continue;
+                if (ln.flags & Line.ML_BLOCKING) continue;
 
-            adjNeighbor[fillPos[bi]] = fi;
-            adjLineIdx[fillPos[bi]] = li;
-            fillPos[bi]++;
+                int fi = ln.frontsector.sectornum;
+                int bi = ln.backsector.sectornum;
+                if (fi == bi) continue;
+
+                adjNeighbor[fillPos[fi]] = bi;
+                adjLineIdx[fillPos[fi]] = li;
+                fillPos[fi]++;
+
+                adjNeighbor[fillPos[bi]] = fi;
+                adjLineIdx[fillPos[bi]] = li;
+                fillPos[bi]++;
+            }
         }
 
         graphBuilt = 1;
@@ -576,9 +629,14 @@ class HoloGPSHandler : StaticEventHandler
         }
 
         Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
+        Vector2 nextMidpoint = midpoint;
+        if (ln.isLinePortal())
+        {
+            nextMidpoint = midpoint + ln.getPortalDisplacement();
+        }
         double curFloor, curCeil, nextFloor, nextCeil;
         GetEffectiveFloorCeil(curSec, midpoint, curFloor, curCeil);
-        GetEffectiveFloorCeil(nextSec, midpoint, nextFloor, nextCeil);
+        GetEffectiveFloorCeil(nextSec, nextMidpoint, nextFloor, nextCeil);
 
         if (abs(nextFloor - curFloor) > STEP_HEIGHT_MAX) return false;
 
@@ -685,77 +743,6 @@ class HoloGPSHandler : StaticEventHandler
         return top;
     }
 
-    // Reusable A* core: resets arrays, seeds startIdx, and expands until goalIdx is found.
-    // Returns 1 if goal reached, 0 otherwise. Populates parent/parentLine/reachable/gScore/fScore.
-    int RunAStar(int startIdx, int goalIdx, Vector2 targetPos, Actor player)
-    {
-        int numSectors = level.sectors.Size();
-        openSet.Clear();
-        heapPos.Resize(numSectors);
-
-        for (int i = 0; i < numSectors; i++)
-        {
-            parent[i] = -1;
-            parentLine[i] = -1;
-            reachable[i] = 0;
-            gScore[i] = SCORE_INFINITY;
-            fScore[i] = SCORE_INFINITY;
-            inOpenSet[i] = false;
-            heapPos[i] = -1;
-        }
-
-        gScore[startIdx] = 0.0;
-        fScore[startIdx] = (level.sectors[startIdx].centerspot - targetPos).Length();
-        reachable[startIdx] = 1;
-        inOpenSet[startIdx] = true;
-        HeapPush(startIdx);
-
-        while (openSet.Size() > 0)
-        {
-            int current = HeapPop();
-            inOpenSet[current] = false;
-            if (current == goalIdx) return 1;
-
-            int nStart = adjStart[current];
-            int nEnd = adjStart[current + 1];
-            for (int ni = nStart; ni < nEnd; ni++)
-            {
-                int neighbor = adjNeighbor[ni];
-                Line ln = level.lines[adjLineIdx[ni]];
-                Sector curSec = level.sectors[current];
-                Sector nextSec = level.sectors[neighbor];
-
-                if (IsPortalPassable(curSec, nextSec, ln, player))
-                {
-                    double dist = (nextSec.centerspot - curSec.centerspot).Length();
-                    double tentativeG = gScore[current] + dist;
-
-                    if (tentativeG < gScore[neighbor])
-                    {
-                        reachable[neighbor] = 1;
-                        parent[neighbor] = current;
-                        parentLine[neighbor] = adjLineIdx[ni];
-                        gScore[neighbor] = tentativeG;
-                        fScore[neighbor] = tentativeG + (nextSec.centerspot - targetPos).Length();
-
-                        if (!inOpenSet[neighbor])
-                        {
-                            inOpenSet[neighbor] = true;
-                            HeapPush(neighbor);
-                        }
-                        else
-                        {
-                            // Decrease-key: sift up from current position
-                            HeapSiftUp(heapPos[neighbor]);
-                        }
-                    }
-                }
-            }
-        }
-
-        return 0;
-    }
-
     // Multi-goal Dijkstra core. Returns the index of the first goal sector reached, or -1.
     int RunAStarMultiGoal(int startIdx, in out Array<bool> isGoal, Vector2 targetPos, Actor player)
     {
@@ -797,7 +784,7 @@ class HoloGPSHandler : StaticEventHandler
 
                 if (IsPortalPassable(curSec, nextSec, ln, player))
                 {
-                    double dist = (nextSec.centerspot - curSec.centerspot).Length();
+                    double dist = ln.isLinePortal() ? (nextSec.centerspot + ln.getPortalDisplacement() - curSec.centerspot).Length() : (nextSec.centerspot - curSec.centerspot).Length();
                     double tentativeG = gScore[current] + dist;
 
                     if (tentativeG < gScore[neighbor])
@@ -903,7 +890,7 @@ class HoloGPSHandler : StaticEventHandler
 
                 if (IsPortalPassable(curSec, nextSec, ln, searchPlayer))
                 {
-                    double dist = (nextSec.centerspot - curSec.centerspot).Length();
+                    double dist = ln.isLinePortal() ? (nextSec.centerspot + ln.getPortalDisplacement() - curSec.centerspot).Length() : (nextSec.centerspot - curSec.centerspot).Length();
                     double tentativeG = gScore[current] + dist;
 
                     if (tentativeG < gScore[neighbor])
@@ -912,7 +899,14 @@ class HoloGPSHandler : StaticEventHandler
                         parent[neighbor] = current;
                         parentLine[neighbor] = adjLineIdx[ni];
                         gScore[neighbor] = tentativeG;
-                        fScore[neighbor] = tentativeG + (nextSec.centerspot - searchTargetPos).Length();
+
+                        double heuristic = 0;
+                        Sector targetSec = level.PointInSector(searchTargetPos);
+                        if (targetSec && nextSec.PortalGroup == targetSec.PortalGroup)
+                        {
+                            heuristic = (nextSec.centerspot - searchTargetPos).Length();
+                        }
+                        fScore[neighbor] = tentativeG + heuristic;
 
                         if (!inOpenSet[neighbor])
                         {
