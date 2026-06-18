@@ -184,34 +184,133 @@ class HoloGPSHandler : StaticEventHandler
         PlayerInfo plyr = players[consoleplayer];
         if (!plyr || !plyr.mo) return;
 
-        // Priority 1: Find a key the player doesn't have
+        Array<Actor> potentialTargets;
+
+        // Priority 1: Find all keys the player doesn't have
         ThinkerIterator it = ThinkerIterator.Create("Key");
         Key mapKey;
         while (mapKey = Key(it.Next()))
         {
             if (!mapKey.owner && !plyr.mo.FindInventory(mapKey.GetClass()))
             {
-                currentTarget = mapKey;
-                return;
+                potentialTargets.Push(mapKey);
             }
         }
 
         // Priority 2: Find exit line specials (243 = Exit_Normal, 244 = Exit_Secret)
-        for (int i = 0; i < level.lines.Size(); i++)
+        if (potentialTargets.Size() == 0)
         {
-            Line ln = level.lines[i];
-            if (ln && (ln.special == 243 || ln.special == 244))
+            for (int i = 0; i < level.lines.Size(); i++)
             {
-                Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
-                double z = level.PointInSector(midpoint).floorplane.ZatPoint(midpoint);
-                Actor spot = Actor.Spawn("MapSpot", (midpoint.x, midpoint.y, z));
-                if (spot)
+                Line ln = level.lines[i];
+                if (ln && (ln.special == 243 || ln.special == 244))
                 {
-                    currentTarget = spot;
-                    return;
+                    Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
+                    double z = level.PointInSector(midpoint).floorplane.ZatPoint(midpoint);
+                    Actor spot = Actor.Spawn("MapSpot", (midpoint.x, midpoint.y, z));
+                    if (spot) potentialTargets.Push(spot);
                 }
             }
         }
+
+        // Find the first target that has a valid path
+        for (int i = 0; i < potentialTargets.Size(); i++)
+        {
+            FindPathBFS(plyr.mo, potentialTargets[i]);
+            if (pathX.Size() > 0)
+            {
+                currentTarget = potentialTargets[i];
+                
+                // Destroy other MapSpots
+                for (int j = 0; j < potentialTargets.Size(); j++)
+                {
+                    if (i != j && potentialTargets[j] && potentialTargets[j].GetClassName() == "MapSpot")
+                    {
+                        potentialTargets[j].Destroy();
+                    }
+                }
+                return;
+            }
+        }
+
+        // If no path found, clean up
+        currentTarget = null;
+        for (int i = 0; i < potentialTargets.Size(); i++)
+        {
+            if (potentialTargets[i] && potentialTargets[i].GetClassName() == "MapSpot")
+            {
+                potentialTargets[i].Destroy();
+            }
+        }
+    }
+
+    bool IsPortalPassable(Sector curSec, Sector nextSec, Line ln, Actor player)
+    {
+        if (!ln || !curSec || !nextSec) return false;
+
+        // 1. Check blocking flags
+        if (ln.flags & Line.ML_BLOCKING) return false;
+
+        // Secrets check
+        bool useSecrets = CVar.GetCVar("holo_gps_use_secrets", players[consoleplayer]).GetBool();
+        if (!useSecrets && (ln.flags & Line.ML_SECRET)) return false;
+
+        Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
+        double curFloor = curSec.floorplane.ZatPoint(midpoint);
+        double curCeil = curSec.ceilingplane.ZatPoint(midpoint);
+        double nextFloor = nextSec.floorplane.ZatPoint(midpoint);
+        double nextCeil = nextSec.ceilingplane.ZatPoint(midpoint);
+
+        // 2. Check step height (player cannot step up more than 24 units)
+        if (nextFloor - curFloor > 24.0) return false;
+
+        // 3. Check gap clearance (must be >= 56 units)
+        double portalFloor = (curFloor > nextFloor) ? curFloor : nextFloor;
+        double portalCeil = (curCeil < nextCeil) ? curCeil : nextCeil;
+        double clearance = portalCeil - portalFloor;
+
+        if (clearance < 56.0)
+        {
+            // Check if it's a direct-use door
+            bool isDirectUse = (ln.activation & (SPAC_Use | SPAC_UseThrough)) != 0;
+            bool isDoorSpecial = false;
+            int spec = ln.special;
+            if (spec == 10 || spec == 11 || spec == 12 || spec == 13 || spec == 105 || spec == 106 || spec == 202)
+            {
+                isDoorSpecial = true;
+            }
+
+            if (isDirectUse && isDoorSpecial)
+            {
+                // Check if locked and player lacks the key
+                if (ln.locknumber != 0)
+                {
+                    PlayerPawn plyrPawn = PlayerPawn(player);
+                    if (plyrPawn && !plyrPawn.CheckKeys(ln.locknumber, false))
+                    {
+                        return false; // Locked and no key
+                    }
+                }
+                // It's a direct-use door the player can open!
+            }
+            else
+            {
+                return false; // Not a direct-use door, so it's too narrow/closed
+            }
+        }
+
+        return true;
+    }
+
+    bool IsPlayerTriggerable(Line ln)
+    {
+        if (ln.special == 0) return false;
+        int act = ln.activation;
+        if (act & (SPAC_Use | SPAC_UseThrough | SPAC_Cross | SPAC_Impact | SPAC_Push | SPAC_AnyCross))
+        {
+            return true;
+        }
+        return false;
     }
 
     void FindPathBFS(Actor player, Actor target)
@@ -237,24 +336,24 @@ class HoloGPSHandler : StaticEventHandler
             return;
         }
 
-        // BFS
+        // Pass 1: Forward BFS from player using only passable portals
         Array<int> parent;
         Array<int> parentLine;
-        Array<int> visited;
+        Array<int> reachable;
         Array<int> queue;
 
         parent.Resize(numSectors);
         parentLine.Resize(numSectors);
-        visited.Resize(numSectors);
+        reachable.Resize(numSectors);
 
         for (int i = 0; i < numSectors; i++)
         {
             parent[i] = -1;
             parentLine[i] = -1;
-            visited[i] = 0;
+            reachable[i] = 0;
         }
 
-        visited[startIdx] = 1;
+        reachable[startIdx] = 1;
         queue.Push(startIdx);
 
         int queueHead = 0;
@@ -277,43 +376,167 @@ class HoloGPSHandler : StaticEventHandler
             for (int ni = nStart; ni < nEnd; ni++)
             {
                 int neighbor = adjNeighbor[ni];
-                if (visited[neighbor] == 0)
+                if (reachable[neighbor] == 0)
                 {
-                    visited[neighbor] = 1;
-                    parent[neighbor] = current;
-                    parentLine[neighbor] = adjLineIdx[ni];
-                    queue.Push(neighbor);
+                    Line ln = level.lines[adjLineIdx[ni]];
+                    Sector curSec = level.sectors[current];
+                    Sector nextSec = level.sectors[neighbor];
+
+                    if (IsPortalPassable(curSec, nextSec, ln, player))
+                    {
+                        reachable[neighbor] = 1;
+                        parent[neighbor] = current;
+                        parentLine[neighbor] = adjLineIdx[ni];
+                        queue.Push(neighbor);
+                    }
                 }
             }
         }
 
-        if (found == 0)
+        // If path is found in Pass 1, reconstruct normally
+        if (found == 1)
         {
-            // No path found — do not draw an impossible route
+            Array<int> reversedLines;
+            int cur = endIdx;
+            while (cur != startIdx && parentLine[cur] >= 0)
+            {
+                reversedLines.Push(parentLine[cur]);
+                cur = parent[cur];
+            }
+
+            for (int i = reversedLines.Size() - 1; i >= 0; i--)
+            {
+                Line ln = level.lines[reversedLines[i]];
+                Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
+                pathX.Push(mid.x);
+                pathY.Push(mid.y);
+            }
+
+            pathX.Push(target.pos.x);
+            pathY.Push(target.pos.y);
             return;
         }
 
-        // Reconstruct path by walking parent chain backwards
-        Array<int> reversedLines;
-        int cur = endIdx;
-        while (cur != startIdx && parentLine[cur] >= 0)
+        // Pass 2: Reverse topological BFS from target to find the barrier
+        Array<int> visitedReverse;
+        Array<int> queueReverse;
+
+        visitedReverse.Resize(numSectors);
+        for (int i = 0; i < numSectors; i++) visitedReverse[i] = 0;
+
+        visitedReverse[endIdx] = 1;
+        queueReverse.Push(endIdx);
+
+        int qHeadReverse = 0;
+        Sector barrierSec = null;
+        bool barrierFound = false;
+
+        while (qHeadReverse < queueReverse.Size())
         {
-            reversedLines.Push(parentLine[cur]);
-            cur = parent[cur];
+            int current = queueReverse[qHeadReverse];
+            qHeadReverse++;
+
+            int nStart = adjStart[current];
+            int nEnd = adjStart[current + 1];
+            for (int ni = nStart; ni < nEnd; ni++)
+            {
+                int neighbor = adjNeighbor[ni];
+
+                if (reachable[neighbor] == 1)
+                {
+                    barrierSec = level.sectors[current];
+                    barrierFound = true;
+                    break;
+                }
+
+                if (visitedReverse[neighbor] == 0)
+                {
+                    visitedReverse[neighbor] = 1;
+                    queueReverse.Push(neighbor);
+                }
+            }
+            if (barrierFound) break;
         }
 
-        // Build waypoints from the line midpoints (in forward order)
-        for (int i = reversedLines.Size() - 1; i >= 0; i--)
+        if (!barrierFound || !barrierSec) return;
+
+        // Search the level for any switches/walkovers that trigger the barrier's tag
+        int bestSwitchSector = -1;
+        Line bestSwitchLine = null;
+        int minPathSteps = 999999;
+
+        for (int li = 0; li < level.lines.Size(); li++)
         {
-            Line ln = level.lines[reversedLines[i]];
-            Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
-            pathX.Push(mid.x);
-            pathY.Push(mid.y);
+            Line ln = level.lines[li];
+            if (!ln || !IsPlayerTriggerable(ln)) continue;
+
+            int targetTag = ln.args[0];
+            if (targetTag == 0) continue;
+
+            bool hasTag = false;
+            SectorTagIterator it = level.CreateSectorTagIterator(targetTag);
+            int secNum;
+            while ((secNum = it.Next()) >= 0)
+            {
+                if (secNum == barrierSec.sectornum)
+                {
+                    hasTag = true;
+                    break;
+                }
+            }
+            if (!hasTag) continue;
+
+            // Check if reachable
+            int switchSecIdx = -1;
+            if (ln.frontsector && reachable[ln.frontsector.sectornum] == 1)
+            {
+                switchSecIdx = ln.frontsector.sectornum;
+            }
+            else if (ln.backsector && reachable[ln.backsector.sectornum] == 1)
+            {
+                switchSecIdx = ln.backsector.sectornum;
+            }
+
+            if (switchSecIdx != -1)
+            {
+                int steps = 0;
+                int cur = switchSecIdx;
+                while (cur != startIdx && parentLine[cur] >= 0)
+                {
+                    steps++;
+                    cur = parent[cur];
+                }
+                if (steps < minPathSteps)
+                {
+                    minPathSteps = steps;
+                    bestSwitchSector = switchSecIdx;
+                    bestSwitchLine = ln;
+                }
+            }
         }
 
-        // Add target position as final waypoint
-        pathX.Push(target.pos.x);
-        pathY.Push(target.pos.y);
+        if (bestSwitchLine && bestSwitchSector != -1)
+        {
+            Array<int> reversedLines;
+            int cur = bestSwitchSector;
+            while (cur != startIdx && parentLine[cur] >= 0)
+            {
+                reversedLines.Push(parentLine[cur]);
+                cur = parent[cur];
+            }
+
+            for (int i = reversedLines.Size() - 1; i >= 0; i--)
+            {
+                Line ln = level.lines[reversedLines[i]];
+                Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
+                pathX.Push(mid.x);
+                pathY.Push(mid.y);
+            }
+
+            Vector2 switchMid = (bestSwitchLine.v1.p + bestSwitchLine.v2.p) / 2.0;
+            pathX.Push(switchMid.x);
+            pathY.Push(switchMid.y);
+        }
     }
 
     double GetFloorZ(Vector2 pos)
