@@ -51,7 +51,7 @@ OptionMenu "HoloGPSMenu"
     Option "Proven Transition Learning", "holo_gps_learning_proven", "OnOff"
     Option "Pheromone Trail Preference", "holo_gps_learning_pheromone", "OnOff"
     Option "Persistent Map Knowledge", "holo_gps_learning_persistent", "OnOff"
-    Slider "Max Maps to Remember", "holo_gps_learning_limit", 1, 50, 1
+    Slider "Max Maps to Remember", "holo_gps_learning_limit", 1, 200, 1
     Command "Check Memory Storage Size", "netevent check_gps_memory"
     Command "Purge GPS Learning Memory", "netevent purge_gps_memory"
 
@@ -65,18 +65,18 @@ OptionMenu "HoloGPSMenu"
     StaticText "" // Blank spacer line
 
     // Path Density & Performance Tuning
-    Slider "Marker Spacing (Units)", "holo_gps_spacing", 32, 256, 16
-    Slider "Update Interval (Ticks)", "holo_gps_freq", 1, 35, 1
-    Slider "Trail Length (Markers)", "holo_gps_max_markers", 1, 32, 1
+    Slider "Marker Spacing (Units)", "holo_gps_spacing", 16, 512, 8
+    Slider "Update Interval (Ticks)", "holo_gps_freq", 1, 140, 1
+    Slider "Trail Length (Markers)", "holo_gps_max_markers", 1, 128, 1
 
     StaticText "" // Blank spacer line
     StaticText "Performance Note: Higher interval reduces lag on massive maps.", 1
     StaticText ""
 
     // Visual Settings
-    Slider "Marker Size", "holo_gps_scale", 0.1, 1.0, 0.05
-    Slider "Marker Float Height", "holo_gps_height", 1.0, 64.0, 1.0
-    Slider "Hologram Opacity", "holo_gps_alpha", 0.1, 1.0, 0.1
+    Slider "Marker Size", "holo_gps_scale", 0.05, 3.0, 0.05
+    Slider "Marker Float Height", "holo_gps_height", 0.0, 256.0, 2.0
+    Slider "Hologram Opacity", "holo_gps_alpha", 0.05, 1.0, 0.05
     Option "Fade Distant Markers", "holo_gps_fade", "OnOff"
     Option "Trail Color", "holo_gps_color", "HoloGPSColorList"
     Option "Render Style", "holo_gps_style", "HoloGPSStyleList"
