@@ -237,7 +237,6 @@ class HoloGPSHandler : StaticEventHandler
             {
                 currentTarget = exitSpots[i];
                 
-                // Destroy unused temporary exit spots
                 for (int j = 0; j < exitSpots.Size(); j++)
                 {
                     if (i != j && exitSpots[j])
@@ -249,7 +248,7 @@ class HoloGPSHandler : StaticEventHandler
             }
             else
             {
-                exitSpots[i].Destroy(); // Clean up if unreachable
+                exitSpots[i].Destroy(); 
             }
         }
 
@@ -281,7 +280,7 @@ class HoloGPSHandler : StaticEventHandler
         {
             bool isDirectUse = (ln.activation & (SPAC_Use | SPAC_UseThrough)) != 0;
             bool isStandardDoor = (ln.special >= 10 && ln.special <= 13) || ln.special == 105 || ln.special == 106 || ln.special == 202;
-            bool isScriptDoor = (ln.special == 80 || ln.special == 226); // Expanded to support Wolf3D ACS doors
+            bool isScriptDoor = (ln.special == 80 || ln.special == 226); 
 
             if (isDirectUse || isStandardDoor || isScriptDoor)
             {
@@ -329,7 +328,39 @@ class HoloGPSHandler : StaticEventHandler
         int startIdx = startSec.sectornum;
         int endIdx = endSec.sectornum;
 
-        if (startIdx == endIdx)
+        // FIX: If the target sector is completely isolated (like a decorative table or pedestal),
+        // look through adjacent lines to shift the target node onto the surrounding floor sector.
+        int realEndIdx = endIdx;
+        if (adjStart[realEndIdx] == adjStart[realEndIdx + 1])
+        {
+            double closestDist = 1e37;
+            for (int i = 0; i < level.lines.Size(); i++)
+            {
+                Line ln = level.lines[i];
+                if (!ln || (!ln.frontsector && !ln.backsector)) continue;
+                
+                if (ln.frontsector && ln.frontsector.sectornum == endIdx && ln.backsector)
+                {
+                    int bIdx = ln.backsector.sectornum;
+                    if (adjStart[bIdx] != adjStart[bIdx + 1]) 
+                    {
+                        double d = (ln.backsector.centerspot - target.pos.xy).Length();
+                        if (d < closestDist) { closestDist = d; realEndIdx = bIdx; }
+                    }
+                }
+                else if (ln.backsector && ln.backsector.sectornum == endIdx && ln.frontsector)
+                {
+                    int fIdx = ln.frontsector.sectornum;
+                    if (adjStart[fIdx] != adjStart[fIdx + 1])
+                    {
+                        double d = (ln.frontsector.centerspot - target.pos.xy).Length();
+                        if (d < closestDist) { closestDist = d; realEndIdx = fIdx; }
+                    }
+                }
+            }
+        }
+
+        if (startIdx == realEndIdx)
         {
             pathX.Push(target.pos.x);
             pathY.Push(target.pos.y);
@@ -388,7 +419,7 @@ class HoloGPSHandler : StaticEventHandler
 
             int current = openSet[bestIdx];
             
-            if (current == endIdx)
+            if (current == realEndIdx)
             {
                 found = 1;
                 break;
@@ -432,7 +463,7 @@ class HoloGPSHandler : StaticEventHandler
         if (found == 1)
         {
             Array<int> reversedLines;
-            int cur = endIdx;
+            int cur = realEndIdx;
             while (cur != startIdx && parentLine[cur] >= 0)
             {
                 reversedLines.Push(parentLine[cur]);
