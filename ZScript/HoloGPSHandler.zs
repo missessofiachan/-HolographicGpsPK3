@@ -65,6 +65,9 @@ class HoloGPSHandler : StaticEventHandler
     Actor currentTarget;
     int tickCounter;
     bool pathFresh; // True when FindNextObjective just found a target (path already computed)
+    Actor lastTarget;
+    int lastPlayerSectorIdx;
+    int lastTargetSectorIdx;
     Array<Actor> activeMarkers;
 
     // Consolidated reusable tracer instance to avoid garbage collector load
@@ -294,10 +297,29 @@ class HoloGPSHandler : StaticEventHandler
         if (currentTarget)
         {
             ClearOldMarkers();
-            if (!pathFresh)
+
+            Sector pSec = level.PointInSector(plyr.mo.pos.xy);
+            Sector tSec = level.PointInSector(currentTarget.pos.xy);
+            int pIdx = pSec ? pSec.sectornum : -1;
+            int tIdx = tSec ? tSec.sectornum : -1;
+
+            bool needsRebuild = true;
+            if (!pathFresh && currentTarget == lastTarget && pIdx == lastPlayerSectorIdx && tIdx == lastTargetSectorIdx)
             {
-                FindPathAStar(plyr.mo, currentTarget);
+                needsRebuild = false;
             }
+
+            if (needsRebuild)
+            {
+                if (!pathFresh)
+                {
+                    FindPathAStar(plyr.mo, currentTarget);
+                }
+                lastTarget = currentTarget;
+                lastPlayerSectorIdx = pIdx;
+                lastTargetSectorIdx = tIdx;
+            }
+
             pathFresh = false;
             RefinePath(plyr.mo.pos.xy);
             SpawnPathMarkers(plyr.mo);
@@ -321,9 +343,13 @@ class HoloGPSHandler : StaticEventHandler
         PlayerInfo plyr = players[consoleplayer];
         if (!plyr || !plyr.mo) return;
 
-        // Pass 1: Find valid, reachable Keys
+        // Pass 1: Find valid, reachable Keys using single multi-target search
         if (cache_priority == 0 || cache_priority == 1)
         {
+            // Collect all uncollected key candidates and their sectors
+            Array<Actor> keyCandidates;
+            Array<int> keySectors;
+
             ThinkerIterator it = ThinkerIterator.Create((cache_extended_search || cache_wolfendoom_compat) ? "Inventory" : "Key");
             Inventory mapKey;
             while (mapKey = Inventory(it.Next()))
@@ -365,12 +391,51 @@ class HoloGPSHandler : StaticEventHandler
 
                 if (isKey && !plyr.mo.FindInventory(mapKey.GetClass()))
                 {
-                    FindPathAStar(plyr.mo, mapKey);
-                    if (pathX.Size() > 0)
+                    Sector keySec = level.PointInSector(mapKey.pos.xy);
+                    if (keySec)
                     {
-                        currentTarget = mapKey;
-                        pathFresh = true;
-                        return;
+                        keyCandidates.Push(mapKey);
+                        keySectors.Push(keySec.sectornum);
+                    }
+                }
+            }
+
+            // Single multi-target search: find nearest reachable key
+            if (keyCandidates.Size() > 0)
+            {
+                Sector startSec = level.PointInSector(plyr.mo.pos.xy);
+                if (startSec)
+                {
+                    int startIdx = startSec.sectornum;
+                    int numSectors = level.sectors.Size();
+                    parent.Resize(numSectors);
+                    parentLine.Resize(numSectors);
+                    reachable.Resize(numSectors);
+                    gScore.Resize(numSectors);
+                    fScore.Resize(numSectors);
+                    inOpenSet.Resize(numSectors);
+
+                    // Mark goal sectors
+                    Array<bool> isGoal;
+                    isGoal.Resize(numSectors);
+                    for (int i = 0; i < numSectors; i++) isGoal[i] = false;
+                    for (int i = 0; i < keySectors.Size(); i++) isGoal[keySectors[i]] = true;
+
+                    int hitGoal = RunAStarMultiGoal(startIdx, isGoal, plyr.mo.pos.xy, plyr.mo);
+                    if (hitGoal >= 0)
+                    {
+                        // Find which key actor lives in the hit sector
+                        for (int i = 0; i < keyCandidates.Size(); i++)
+                        {
+                            if (keySectors[i] == hitGoal)
+                            {
+                                currentTarget = keyCandidates[i];
+                                // Build the path from RunAStar's parent data
+                                BuildPathFromParent(startIdx, hitGoal, keyCandidates[i]);
+                                pathFresh = true;
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -449,10 +514,9 @@ class HoloGPSHandler : StaticEventHandler
         }
 
         Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
-        double curFloor = curSec.floorplane.ZatPoint(midpoint);
-        double curCeil = curSec.ceilingplane.ZatPoint(midpoint);
-        double nextFloor = nextSec.floorplane.ZatPoint(midpoint);
-        double nextCeil = nextSec.ceilingplane.ZatPoint(midpoint);
+        double curFloor, curCeil, nextFloor, nextCeil;
+        GetEffectiveFloorCeil(curSec, midpoint, curFloor, curCeil);
+        GetEffectiveFloorCeil(nextSec, midpoint, nextFloor, nextCeil);
 
         if (abs(nextFloor - curFloor) > STEP_HEIGHT_MAX) return false;
 
@@ -628,6 +692,103 @@ class HoloGPSHandler : StaticEventHandler
         }
 
         return 0;
+    }
+
+    // Multi-goal Dijkstra core. Returns the index of the first goal sector reached, or -1.
+    int RunAStarMultiGoal(int startIdx, in out Array<bool> isGoal, Vector2 targetPos, Actor player)
+    {
+        int numSectors = level.sectors.Size();
+        openSet.Clear();
+        heapPos.Resize(numSectors);
+
+        for (int i = 0; i < numSectors; i++)
+        {
+            parent[i] = -1;
+            parentLine[i] = -1;
+            reachable[i] = 0;
+            gScore[i] = SCORE_INFINITY;
+            fScore[i] = SCORE_INFINITY;
+            inOpenSet[i] = false;
+            heapPos[i] = -1;
+        }
+
+        gScore[startIdx] = 0.0;
+        fScore[startIdx] = 0.0;
+        reachable[startIdx] = 1;
+        inOpenSet[startIdx] = true;
+        HeapPush(startIdx);
+
+        while (openSet.Size() > 0)
+        {
+            int current = HeapPop();
+            inOpenSet[current] = false;
+            if (isGoal[current]) return current;
+
+            int nStart = adjStart[current];
+            int nEnd = adjStart[current + 1];
+            for (int ni = nStart; ni < nEnd; ni++)
+            {
+                int neighbor = adjNeighbor[ni];
+                Line ln = level.lines[adjLineIdx[ni]];
+                Sector curSec = level.sectors[current];
+                Sector nextSec = level.sectors[neighbor];
+
+                if (IsPortalPassable(curSec, nextSec, ln, player))
+                {
+                    double dist = (nextSec.centerspot - curSec.centerspot).Length();
+                    double tentativeG = gScore[current] + dist;
+
+                    if (tentativeG < gScore[neighbor])
+                    {
+                        reachable[neighbor] = 1;
+                        parent[neighbor] = current;
+                        parentLine[neighbor] = adjLineIdx[ni];
+                        gScore[neighbor] = tentativeG;
+                        fScore[neighbor] = tentativeG; // Pure Dijkstra
+
+                        if (!inOpenSet[neighbor])
+                        {
+                            inOpenSet[neighbor] = true;
+                            HeapPush(neighbor);
+                        }
+                        else
+                        {
+                            HeapSiftUp(heapPos[neighbor]);
+                        }
+                    }
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    void BuildPathFromParent(int startIdx, int endIdx, Actor target)
+    {
+        pathX.Clear();
+        pathY.Clear();
+
+        Array<int> reversedLines;
+        int cur = endIdx;
+        while (cur != startIdx && parentLine[cur] >= 0)
+        {
+            reversedLines.Push(parentLine[cur]);
+            cur = parent[cur];
+        }
+
+        for (int i = reversedLines.Size() - 1; i >= 0; i--)
+        {
+            Line ln = level.lines[reversedLines[i]];
+            Vector2 mid = (ln.v1.p + ln.v2.p) / 2.0;
+            pathX.Push(mid.x);
+            pathY.Push(mid.y);
+        }
+
+        if (target)
+        {
+            pathX.Push(target.pos.x);
+            pathY.Push(target.pos.y);
+        }
     }
 
     void FindPathAStar(Actor player, Actor target)
@@ -841,11 +1002,45 @@ class HoloGPSHandler : StaticEventHandler
         }
     }
 
+    // Compute effective walkable floor and ceiling at a point, accounting for solid 3D floors.
+    // Finds the highest solid floor at or below the sector ceiling, and the lowest ceiling above it.
+    void GetEffectiveFloorCeil(Sector sec, Vector2 pos, out double floorZ, out double ceilZ)
+    {
+        floorZ = sec.floorplane.ZatPoint(pos);
+        ceilZ = sec.ceilingplane.ZatPoint(pos);
+
+        int count = sec.Get3DFloorCount();
+        for (int i = 0; i < count; i++)
+        {
+            F3DFloor f3d = sec.Get3DFloor(i);
+            if (!f3d || !(f3d.flags & F3DFloor.FF_EXISTS) || !(f3d.flags & F3DFloor.FF_SOLID))
+                continue;
+
+            double fTop = f3d.top.ZatPoint(pos);
+            double fBot = f3d.bottom.ZatPoint(pos);
+
+            // If this 3D floor's top is above the current effective floor
+            // and below the ceiling, it raises the walkable floor
+            if (fTop > floorZ && fTop < ceilZ)
+            {
+                floorZ = fTop;
+            }
+            // If this 3D floor's bottom is below the current effective ceiling
+            // and above the floor, it lowers the head clearance
+            if (fBot < ceilZ && fBot > floorZ)
+            {
+                ceilZ = fBot;
+            }
+        }
+    }
+
     double GetFloorZ(Vector2 pos)
     {
         Sector sec = level.PointInSector(pos);
-        if (sec) return sec.floorplane.ZatPoint(pos);
-        return 0;
+        if (!sec) return 0;
+        double f, c;
+        GetEffectiveFloorCeil(sec, pos, f, c);
+        return f;
     }
 
     bool PathIsBlocked(Vector2 start, Vector2 end)
@@ -867,7 +1062,24 @@ class HoloGPSHandler : StaticEventHandler
         if (!sec) return false;
 
         mTracer.Trace(pA, sec, dir, len, TRACE_ReportPortals, 0xFFFFFFFF, true);
-        return mTracer.Results.HitType != TRACE_HitNone;
+        if (mTracer.Results.HitType != TRACE_HitNone) return true;
+
+        // Validate midpoint: catch traces that clip through thin walls
+        if (len > 64.0)
+        {
+            Vector2 mid = (start + end) * 0.5;
+            Sector midSec = level.PointInSector(mid);
+            if (midSec)
+            {
+                double midFloor = midSec.floorplane.ZatPoint(mid);
+                double midCeil = midSec.ceilingplane.ZatPoint(mid);
+                // If midpoint has no clearance or a massive floor jump, it's blocked
+                if (midCeil - midFloor < CLEARANCE_MIN) return true;
+                if (abs(midFloor - floorzA) > STEP_HEIGHT_MAX && abs(midFloor - floorzB) > STEP_HEIGHT_MAX) return true;
+            }
+        }
+
+        return false;
     }
 
     double GetPathDist(Vector2 start, in out Array<double> px, in out Array<double> py, Vector2 end)
