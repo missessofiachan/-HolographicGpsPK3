@@ -631,18 +631,22 @@ class HoloGPSHandler : StaticEventHandler {
           if (tIdx == knownTextures.Size()) {
             knownTextures.Push(texName);
             textureScores.Push(0.01);
+            learningDirty = true;
           } else {
             textureScores[tIdx] = textureScores[tIdx] + 0.01;
             if (textureScores[tIdx] > 1.0) textureScores[tIdx] = 1.0;
+            learningDirty = true;
           }
 
           int light = playerSec.lightlevel;
           if (brightnessSamples == 0) {
             avgBrightness = light;
             brightnessSamples = 1;
+            learningDirty = true;
           } else {
             avgBrightness = (avgBrightness * brightnessSamples + light) / (brightnessSamples + 1);
             brightnessSamples++;
+            learningDirty = true;
           }
         }
       }
@@ -735,6 +739,26 @@ class HoloGPSHandler : StaticEventHandler {
         refinedY.Copy(pathY);
       }
       SpawnPathMarkers(plyr.mo);
+    }
+
+    if (learningDirty && plyr) {
+      learningDirty = false;
+      string curHash = GetMapHash();
+      HoloMapKnowledge curMap = null;
+      for(int i = 0; i < sessionKnowledge.Size(); i++) {
+         if (sessionKnowledge[i].mapHash == curHash) {
+            curMap = sessionKnowledge[i];
+            break;
+         }
+      }
+      if (!curMap) {
+         curMap = new("HoloMapKnowledge");
+         curMap.mapHash = curHash;
+         sessionKnowledge.Push(curMap);
+      }
+      curMap.adjProven.Copy(adjProven);
+      CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyr);
+      if (cvBlob) cvBlob.SetString(SerializeLearningData());
     }
   }
 
