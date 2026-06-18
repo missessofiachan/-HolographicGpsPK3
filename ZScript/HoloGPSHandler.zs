@@ -84,6 +84,7 @@ class HoloGPSHandler : StaticEventHandler {
   CVar cv_learning_proven;
   CVar cv_learning_pheromone;
   CVar cv_learning_persistent;
+  CVar cv_learning_limit;
   CVar cv_3dfloors;
   CVar cv_portals;
   CVar cv_solve_switches;
@@ -110,6 +111,7 @@ class HoloGPSHandler : StaticEventHandler {
   bool cache_learning_proven;
   bool cache_learning_pheromone;
   bool cache_learning_persistent;
+  int cache_learning_limit;
   bool cache_3dfloors;
   bool cache_portals;
   bool cache_solve_switches;
@@ -166,9 +168,11 @@ class HoloGPSHandler : StaticEventHandler {
 
     if (usePersistent && lastMapName != "") {
       HoloMapKnowledge saved = null;
+      int existingIdx = -1;
       for (int i = 0; i < sessionKnowledge.Size(); i++) {
         if (sessionKnowledge[i].mapName == lastMapName) {
           saved = sessionKnowledge[i];
+          existingIdx = i;
           break;
         }
       }
@@ -176,9 +180,22 @@ class HoloGPSHandler : StaticEventHandler {
         saved = new("HoloMapKnowledge");
         saved.mapName = lastMapName;
         sessionKnowledge.Push(saved);
+      } else if (existingIdx >= 0) {
+        sessionKnowledge.Delete(existingIdx);
+        sessionKnowledge.Push(saved);
       }
       saved.adjProven.Copy(adjProven);
       saved.sectorPheromone.Copy(sectorPheromone);
+
+      int limitVal = 10;
+      if (plyr) {
+        CVar limitCV = CVar.GetCVar("holo_gps_learning_limit", plyr);
+        if (limitCV) limitVal = limitCV.GetInt();
+      }
+      if (limitVal < 1) limitVal = 1;
+      while (sessionKnowledge.Size() > limitVal) {
+        sessionKnowledge.Delete(0);
+      }
     }
 
     currentTarget = null;
@@ -204,13 +221,18 @@ class HoloGPSHandler : StaticEventHandler {
 
     if (usePersistent) {
       HoloMapKnowledge loaded = null;
+      int loadedIdx = -1;
       for (int i = 0; i < sessionKnowledge.Size(); i++) {
         if (sessionKnowledge[i].mapName == currentMap) {
           loaded = sessionKnowledge[i];
+          loadedIdx = i;
           break;
         }
       }
       if (loaded) {
+        sessionKnowledge.Delete(loadedIdx);
+        sessionKnowledge.Push(loaded);
+
         if (loaded.sectorPheromone.Size() == sectorPheromone.Size()) {
           sectorPheromone.Copy(loaded.sectorPheromone);
         }
@@ -494,6 +516,24 @@ class HoloGPSHandler : StaticEventHandler {
       if (activeMarkers[i] && !activeMarkers[i].bDestroyed) {
         activeMarkers[i].A_SetRenderStyle(0.0, STYLE_None);
       }
+    }
+  }
+
+  override void NetworkProcess(ConsoleEvent e) {
+    if (e.Name == "purge_gps_memory") {
+      sessionKnowledge.Clear();
+      lastPlayerSecIdx = -1;
+
+      int numSectors = level.sectors.Size();
+      for (int i = 0; i < numSectors; i++) {
+        sectorPheromone[i] = 0.0;
+      }
+      int totalAdj = adjProven.Size();
+      for (int i = 0; i < totalAdj; i++) {
+        adjProven[i] = false;
+      }
+
+      Console.Printf("Holographic GPS: Memory database purged.");
     }
   }
 

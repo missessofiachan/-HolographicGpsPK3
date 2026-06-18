@@ -28,3 +28,6 @@ user bool   holo_gps_portals = true;
 user bool   holo_gps_solve_switches = true;
 user bool   holo_gps_smoothing = true;
 
+// Learning Datastore Limits
+user int    holo_gps_learning_limit = 10;
+
