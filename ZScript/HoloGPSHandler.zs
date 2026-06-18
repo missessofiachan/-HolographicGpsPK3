@@ -63,6 +63,8 @@ class HoloGPSHandler : StaticEventHandler
     float cache_height;
     int cache_priority;
     int cache_style;
+    bool cache_extended_search;
+    bool cache_wolfendoom_compat;
 
     // Pathfinding result: ordered waypoints from player to target
     Array<double> pathX;
@@ -176,6 +178,8 @@ class HoloGPSHandler : StaticEventHandler
         cache_height = CVar.GetCVar("holo_gps_height", plyr).GetFloat();
         cache_priority = CVar.GetCVar("holo_gps_priority", plyr).GetInt();
         cache_style = CVar.GetCVar("holo_gps_style", plyr).GetInt();
+        cache_extended_search = CVar.GetCVar("holo_gps_extended_search", plyr).GetBool();
+        cache_wolfendoom_compat = CVar.GetCVar("holo_gps_wolfendoom_compat", plyr).GetBool();
 
         if (!cache_enabled) return;
 
@@ -185,9 +189,10 @@ class HoloGPSHandler : StaticEventHandler
 
         if (currentTarget)
         {
-            if (currentTarget is "Key")
+            if (currentTarget is "Inventory")
             {
-                if (Key(currentTarget).owner || plyr.mo.FindInventory(currentTarget.GetClassName()))
+                Inventory inv = Inventory(currentTarget);
+                if (inv.owner || plyr.mo.FindInventory(inv.GetClass()))
                 {
                     currentTarget = null;
                 }
@@ -229,11 +234,48 @@ class HoloGPSHandler : StaticEventHandler
         // Pass 1: Find valid, reachable Keys
         if (cache_priority == 0 || cache_priority == 1)
         {
-            ThinkerIterator it = ThinkerIterator.Create("Key");
-            Key mapKey;
-            while (mapKey = Key(it.Next()))
+            ThinkerIterator it = ThinkerIterator.Create((cache_extended_search || cache_wolfendoom_compat) ? "Inventory" : "Key");
+            Inventory mapKey;
+            while (mapKey = Inventory(it.Next()))
             {
-                if (!mapKey.owner && !plyr.mo.FindInventory(mapKey.GetClass()))
+                if (mapKey.owner) continue;
+
+                bool isKey = false;
+                if (mapKey is "Key")
+                {
+                    isKey = true;
+                }
+                else if (cache_extended_search && mapKey.bSPECIAL)
+                {
+                    string cname = mapKey.GetClassName();
+                    cname = cname.MakeLower();
+                    
+                    bool hasKeyMatch = false;
+                    if (cname.IndexOf("key") == cname.Length() - 3) hasKeyMatch = true;
+                    else if (cname.IndexOf("key") == 0) hasKeyMatch = true;
+                    else if (cname.IndexOf("card") == cname.Length() - 4) hasKeyMatch = true;
+                    else if (cname.IndexOf("skull") == cname.Length() - 5) hasKeyMatch = true;
+
+                    if (hasKeyMatch)
+                    {
+                        isKey = true;
+                    }
+                }
+
+                if (!isKey && cache_wolfendoom_compat && mapKey.bSPECIAL)
+                {
+                    SpriteID ykey = Actor.GetSpriteIndex("YKEY");
+                    SpriteID bkey = Actor.GetSpriteIndex("BKEY");
+                    SpriteID rkey = Actor.GetSpriteIndex("RKEY");
+                    SpriteID gkey = Actor.GetSpriteIndex("GKEY");
+                    SpriteID skey = Actor.GetSpriteIndex("SKEY");
+                    if (mapKey.sprite == ykey || mapKey.sprite == bkey || mapKey.sprite == rkey || mapKey.sprite == gkey || mapKey.sprite == skey)
+                    {
+                        isKey = true;
+                    }
+                }
+
+                if (isKey && !plyr.mo.FindInventory(mapKey.GetClass()))
                 {
                     FindPathAStar(plyr.mo, mapKey);
                     if (pathX.Size() > 0)

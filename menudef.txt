@@ -39,6 +39,8 @@ OptionMenu "HoloGPSMenu"
     // Master Switch
     Option "Enable Navigation Path", "holo_gps_enabled", "OnOff"
     Option "Objective Priority", "holo_gps_priority", "HoloGPSPriorityList"
+    Option "Mod Key Compatibility Search", "holo_gps_extended_search", "OnOff"
+    Option "WolfenDOOM Key Compatibility", "holo_gps_wolfendoom_compat", "OnOff"
     Option "Route Through Secret Doors", "holo_gps_use_secrets", "OnOff"
 
     StaticText "" // Blank spacer line
