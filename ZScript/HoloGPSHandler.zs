@@ -400,8 +400,15 @@ class HoloGPSHandler : StaticEventHandler {
         if (loaded.sectorPheromone.Size() == sectorPheromone.Size()) {
           sectorPheromone.Copy(loaded.sectorPheromone);
         }
-        if (loaded.adjProven.Size() == adjProven.Size()) {
-          adjProven.Copy(loaded.adjProven);
+        
+        int copySize = loaded.adjProven.Size();
+        if (adjProven.Size() < copySize) {
+          copySize = adjProven.Size();
+        }
+        for (int i = 0; i < copySize; i++) {
+          if (loaded.adjProven[i]) {
+            adjProven[i] = true;
+          }
         }
       }
     } 
