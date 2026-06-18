@@ -64,6 +64,7 @@ class HoloGPSHandler : StaticEventHandler
 
     Actor currentTarget;
     int tickCounter;
+    bool pathFresh; // True when FindNextObjective just found a target (path already computed)
     Array<Actor> activeMarkers;
 
     // Consolidated reusable tracer instance to avoid garbage collector load
@@ -109,6 +110,7 @@ class HoloGPSHandler : StaticEventHandler
     Array<double> fScore;
     Array<int> openSet;
     Array<bool> inOpenSet;
+    Array<int> heapPos;  // Maps sector index → position in openSet heap (-1 if absent)
 
     // Persistent helper arrays for reverse topological fallback search
     Array<int> visitedReverse;
@@ -285,13 +287,18 @@ class HoloGPSHandler : StaticEventHandler
         if (!currentTarget || currentTarget.bDestroyed)
         {
             currentTarget = null;
+            pathFresh = false;
             FindNextObjective();
         }
 
         if (currentTarget)
         {
             ClearOldMarkers();
-            FindPathAStar(plyr.mo, currentTarget);
+            if (!pathFresh)
+            {
+                FindPathAStar(plyr.mo, currentTarget);
+            }
+            pathFresh = false;
             RefinePath(plyr.mo.pos.xy);
             SpawnPathMarkers(plyr.mo);
         }
@@ -299,14 +306,14 @@ class HoloGPSHandler : StaticEventHandler
 
     void ClearOldMarkers()
     {
+        // Hide pooled markers instead of destroying them
         for (int i = 0; i < activeMarkers.Size(); i++)
         {
             if (activeMarkers[i] && !activeMarkers[i].bDestroyed)
             {
-                activeMarkers[i].Destroy();
+                activeMarkers[i].A_SetRenderStyle(0.0, STYLE_None);
             }
         }
-        activeMarkers.Clear();
     }
 
     void FindNextObjective()
@@ -362,6 +369,7 @@ class HoloGPSHandler : StaticEventHandler
                     if (pathX.Size() > 0)
                     {
                         currentTarget = mapKey;
+                        pathFresh = true;
                         return;
                     }
                 }
@@ -404,6 +412,7 @@ class HoloGPSHandler : StaticEventHandler
                 if (pathX.Size() > 0)
                 {
                     currentTarget = exitSpots[i];
+                    pathFresh = true;
                     foundIdx = i;
                     break;
                 }
@@ -485,12 +494,78 @@ class HoloGPSHandler : StaticEventHandler
         return false;
     }
 
+    // --- Binary min-heap helpers operating on openSet[], keyed by fScore[] ---
+
+    void HeapSwap(int a, int b)
+    {
+        int tmp = openSet[a];
+        openSet[a] = openSet[b];
+        openSet[b] = tmp;
+        heapPos[openSet[a]] = a;
+        heapPos[openSet[b]] = b;
+    }
+
+    void HeapSiftUp(int idx)
+    {
+        while (idx > 0)
+        {
+            int par = (idx - 1) / 2;
+            if (fScore[openSet[idx]] < fScore[openSet[par]])
+            {
+                HeapSwap(idx, par);
+                idx = par;
+            }
+            else break;
+        }
+    }
+
+    void HeapSiftDown(int idx, int size)
+    {
+        while (true)
+        {
+            int best = idx;
+            int left = 2 * idx + 1;
+            int right = 2 * idx + 2;
+            if (left < size && fScore[openSet[left]] < fScore[openSet[best]]) best = left;
+            if (right < size && fScore[openSet[right]] < fScore[openSet[best]]) best = right;
+            if (best != idx)
+            {
+                HeapSwap(idx, best);
+                idx = best;
+            }
+            else break;
+        }
+    }
+
+    void HeapPush(int sector)
+    {
+        int idx = openSet.Size();
+        openSet.Push(sector);
+        heapPos[sector] = idx;
+        HeapSiftUp(idx);
+    }
+
+    int HeapPop()
+    {
+        int top = openSet[0];
+        int last = openSet.Size() - 1;
+        if (last > 0)
+        {
+            HeapSwap(0, last);
+        }
+        heapPos[top] = -1;
+        openSet.Delete(last);
+        if (openSet.Size() > 0) HeapSiftDown(0, openSet.Size());
+        return top;
+    }
+
     // Reusable A* core: resets arrays, seeds startIdx, and expands until goalIdx is found.
     // Returns 1 if goal reached, 0 otherwise. Populates parent/parentLine/reachable/gScore/fScore.
     int RunAStar(int startIdx, int goalIdx, Vector2 targetPos, Actor player)
     {
         int numSectors = level.sectors.Size();
         openSet.Clear();
+        heapPos.Resize(numSectors);
 
         for (int i = 0; i < numSectors; i++)
         {
@@ -500,29 +575,20 @@ class HoloGPSHandler : StaticEventHandler
             gScore[i] = SCORE_INFINITY;
             fScore[i] = SCORE_INFINITY;
             inOpenSet[i] = false;
+            heapPos[i] = -1;
         }
 
         gScore[startIdx] = 0.0;
         fScore[startIdx] = (level.sectors[startIdx].centerspot - targetPos).Length();
         reachable[startIdx] = 1;
-        openSet.Push(startIdx);
         inOpenSet[startIdx] = true;
+        HeapPush(startIdx);
 
         while (openSet.Size() > 0)
         {
-            int bestIdx = 0;
-            double minF = fScore[openSet[0]];
-            for (int i = 1; i < openSet.Size(); i++)
-            {
-                int node = openSet[i];
-                if (fScore[node] < minF) { minF = fScore[node]; bestIdx = i; }
-            }
-
-            int current = openSet[bestIdx];
-            if (current == goalIdx) return 1;
-
-            openSet.Delete(bestIdx);
+            int current = HeapPop();
             inOpenSet[current] = false;
+            if (current == goalIdx) return 1;
 
             int nStart = adjStart[current];
             int nEnd = adjStart[current + 1];
@@ -548,8 +614,13 @@ class HoloGPSHandler : StaticEventHandler
 
                         if (!inOpenSet[neighbor])
                         {
-                            openSet.Push(neighbor);
                             inOpenSet[neighbor] = true;
+                            HeapPush(neighbor);
+                        }
+                        else
+                        {
+                            // Decrease-key: sift up from current position
+                            HeapSiftUp(heapPos[neighbor]);
                         }
                     }
                 }
@@ -990,7 +1061,26 @@ class HoloGPSHandler : StaticEventHandler
                 double floorz = spawnSec.floorplane.ZatPoint(spawnXY);
                 Vector3 spawnPos = (spawnXY.x, spawnXY.y, floorz + cache_height);
 
-                Actor marker = Actor.Spawn("HoloPathMarker", spawnPos);
+                Actor marker;
+                if (spawnedCount < activeMarkers.Size() && activeMarkers[spawnedCount] && !activeMarkers[spawnedCount].bDestroyed)
+                {
+                    // Reuse existing pooled marker
+                    marker = activeMarkers[spawnedCount];
+                    marker.SetOrigin(spawnPos, false);
+                }
+                else
+                {
+                    // Pool is exhausted — spawn a new one
+                    marker = Actor.Spawn("HoloPathMarker", spawnPos);
+                    if (marker)
+                    {
+                        if (spawnedCount < activeMarkers.Size())
+                            activeMarkers[spawnedCount] = marker;
+                        else
+                            activeMarkers.Push(marker);
+                    }
+                }
+
                 if (marker)
                 {
                     if (cache_scale <= 0.0) cache_scale = 0.25;
@@ -1022,13 +1112,22 @@ class HoloGPSHandler : StaticEventHandler
                         marker.A_SetRenderStyle(markerAlpha, defaultStyle);
                     }
 
-                    activeMarkers.Push(marker);
                     spawnedCount++;
                     lastSpawnPos = spawnXY;
                 }
             }
             if (spawnedCount >= cache_max_markers) break;
             prevPoint = waypoint;
+        }
+
+        // Destroy excess pooled markers beyond what we used this frame
+        for (int i = activeMarkers.Size() - 1; i >= spawnedCount; i--)
+        {
+            if (activeMarkers[i] && !activeMarkers[i].bDestroyed)
+            {
+                activeMarkers[i].Destroy();
+            }
+            activeMarkers.Delete(i);
         }
     }
 }
