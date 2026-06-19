@@ -54,6 +54,7 @@ class HoloGPSHandler : StaticEventHandler {
 
   Actor currentTarget;
   int tickCounter;
+  int lastTargetMode;
   bool pathFresh; // True when FindNextObjective just found a target (path
                   // already computed)
   Array<Actor> activeMarkers;
@@ -64,6 +65,7 @@ class HoloGPSHandler : StaticEventHandler {
 
   // Cached CVar references to completely bypass tick-based string hash lookups
   CVar cv_enabled;
+  CVar cv_target_mode;
   CVar cv_freq;
   CVar cv_use_secrets;
   CVar cv_alpha;
@@ -116,6 +118,7 @@ class HoloGPSHandler : StaticEventHandler {
   float cache_scale;
   float cache_height;
   int cache_priority;
+  int cache_target_mode;
   int cache_style;
   bool cache_extended_search;
   bool cache_wolfendoom_compat;
@@ -556,6 +559,7 @@ class HoloGPSHandler : StaticEventHandler {
     if (cv_enabled)
       return;
     cv_enabled = CVar.GetCVar("holo_gps_enabled", plyr);
+    cv_target_mode = CVar.GetCVar("holo_gps_target_mode", plyr);
     cv_freq = CVar.GetCVar("holo_gps_freq", plyr);
     cv_use_secrets = CVar.GetCVar("holo_gps_use_secrets", plyr);
     cv_alpha = CVar.GetCVar("holo_gps_alpha", plyr);
@@ -722,6 +726,7 @@ class HoloGPSHandler : StaticEventHandler {
     cache_scale = cv_scale.GetFloat();
     cache_height = cv_height.GetFloat();
     cache_priority = cv_priority.GetInt();
+    cache_target_mode = cv_target_mode.GetInt();
     cache_style = cv_style.GetInt();
     cache_extended_search = cv_extended_search.GetBool();
     cache_wolfendoom_compat = cv_wolfendoom_compat.GetBool();
@@ -732,6 +737,11 @@ class HoloGPSHandler : StaticEventHandler {
     cache_portals = cv_portals.GetBool();
     cache_solve_switches = cv_solve_switches.GetBool();
     cache_smoothing = cv_smoothing.GetBool();
+
+    if (cache_target_mode != lastTargetMode) {
+      currentTarget = null;
+      lastTargetMode = cache_target_mode;
+    }
 
     if (currentTarget) {
       if (currentTarget is "Inventory") {
@@ -850,6 +860,25 @@ class HoloGPSHandler : StaticEventHandler {
            Console.Printf("HoloGPS Debug: Current live CVAR length is %d", cvBlob.GetString().Length());
         }
       }
+    } else if (e.Name == "cycle_gps_mode") {
+      PlayerInfo plyr = players[e.Player];
+      if (plyr) {
+        CVar cv = CVar.GetCVar("holo_gps_target_mode", plyr);
+        if (cv) {
+          int currentMode = cv.GetInt();
+          int nextMode = (currentMode + 1) % 4;
+          cv.SetInt(nextMode);
+
+          // Print message to the user HUD or console
+          string modeName = "";
+          if (nextMode == 0) modeName = "Standard (Keys -> Exit)";
+          else if (nextMode == 1) modeName = "Secrets Hunt";
+          else if (nextMode == 2) modeName = "Purge Mode (Monsters)";
+          else if (nextMode == 3) modeName = "Scavenger Mode (Items)";
+
+          Console.Printf("Holographic GPS: Mode changed to \c[Green]%s\c-", modeName);
+        }
+      }
     }
   }
 
@@ -879,128 +908,193 @@ class HoloGPSHandler : StaticEventHandler {
     exitSpots.Clear();
     exitSectors.Clear();
 
-    // Pass 1: Find valid, reachable Keys using single multi-target search
-    if (cache_priority == 0 || cache_priority == 1) {
+    if (cache_target_mode == 0) {
+      // Pass 1: Find valid, reachable Keys using single multi-target search
+      if (cache_priority == 0 || cache_priority == 1) {
 
-      ThinkerIterator it = ThinkerIterator.Create(
-          (cache_extended_search || cache_wolfendoom_compat) ? "Inventory"
-                                                             : "Key");
-      Inventory mapKey;
-      while (mapKey = Inventory(it.Next())) {
-        if (mapKey.owner)
-          continue;
+        ThinkerIterator it = ThinkerIterator.Create(
+            (cache_extended_search || cache_wolfendoom_compat) ? "Inventory"
+                                                               : "Key");
+        Inventory mapKey;
+        while (mapKey = Inventory(it.Next())) {
+          if (mapKey.owner)
+            continue;
 
-        bool isKey = false;
-        if (mapKey is "Key") {
-          isKey = true;
-        } else if (cache_extended_search && mapKey.bSPECIAL) {
-          string cname = mapKey.GetClassName();
-          cname = cname.MakeLower();
-
-          bool hasKeyMatch = false;
-          if (cname.IndexOf("key") == cname.Length() - 3)
-            hasKeyMatch = true;
-          else if (cname.IndexOf("key") == 0)
-            hasKeyMatch = true;
-          else if (cname.IndexOf("card") == cname.Length() - 4)
-            hasKeyMatch = true;
-          else if (cname.IndexOf("skull") == cname.Length() - 5)
-            hasKeyMatch = true;
-
-          if (hasKeyMatch) {
+          bool isKey = false;
+          if (mapKey is "Key") {
             isKey = true;
+          } else if (cache_extended_search && mapKey.bSPECIAL) {
+            string cname = mapKey.GetClassName();
+            cname = cname.MakeLower();
+
+            bool hasKeyMatch = false;
+            if (cname.IndexOf("key") == cname.Length() - 3)
+              hasKeyMatch = true;
+            else if (cname.IndexOf("key") == 0)
+              hasKeyMatch = true;
+            else if (cname.IndexOf("card") == cname.Length() - 4)
+              hasKeyMatch = true;
+            else if (cname.IndexOf("skull") == cname.Length() - 5)
+              hasKeyMatch = true;
+
+            if (hasKeyMatch) {
+              isKey = true;
+            }
+          }
+
+          if (!isKey && cache_wolfendoom_compat && mapKey.bSPECIAL) {
+            if (mapKey.sprite == ykeySprite || mapKey.sprite == bkeySprite ||
+                mapKey.sprite == rkeySprite || mapKey.sprite == gkeySprite ||
+                mapKey.sprite == skeySprite || mapKey.sprite == goldKeySprite ||
+                mapKey.sprite == silvKeySprite) {
+              isKey = true;
+            }
+          }
+
+          if (isKey && !plyr.mo.FindInventory(mapKey.GetClass())) {
+            Sector keySec = level.PointInSector(mapKey.pos.xy);
+            if (keySec) {
+              int snappedIdx =
+                  GetValidSnappedSector(keySec.sectornum, mapKey, plyr.mo);
+              keyCandidates.Push(mapKey);
+              keySectors.Push(snappedIdx);
+            }
           }
         }
 
-        if (!isKey && cache_wolfendoom_compat && mapKey.bSPECIAL) {
-          if (mapKey.sprite == ykeySprite || mapKey.sprite == bkeySprite ||
-              mapKey.sprite == rkeySprite || mapKey.sprite == gkeySprite ||
-              mapKey.sprite == skeySprite || mapKey.sprite == goldKeySprite ||
-              mapKey.sprite == silvKeySprite) {
-            isKey = true;
-          }
-        }
+        // Single multi-target search: find nearest reachable key
+        if (keyCandidates.Size() > 0) {
+          Sector startSec = level.PointInSector(plyr.mo.pos.xy);
+          if (startSec) {
+            int startIdx = startSec.sectornum;
+            int numSectors = level.sectors.Size();
+            parent.Resize(numSectors);
+            parentLine.Resize(numSectors);
+            reachable.Resize(numSectors);
+            gScore.Resize(numSectors);
+            fScore.Resize(numSectors);
+            inOpenSet.Resize(numSectors);
 
-        if (isKey && !plyr.mo.FindInventory(mapKey.GetClass())) {
-          Sector keySec = level.PointInSector(mapKey.pos.xy);
-          if (keySec) {
-            int snappedIdx =
-                GetValidSnappedSector(keySec.sectornum, mapKey, plyr.mo);
-            keyCandidates.Push(mapKey);
-            keySectors.Push(snappedIdx);
-          }
-        }
-      }
+            // Mark goal sectors
+            isGoal.Resize(numSectors);
+            for (int i = 0; i < numSectors; i++)
+              isGoal[i] = false;
+            for (int i = 0; i < keySectors.Size(); i++)
+              isGoal[keySectors[i]] = true;
 
-      // Single multi-target search: find nearest reachable key
-      if (keyCandidates.Size() > 0) {
-        Sector startSec = level.PointInSector(plyr.mo.pos.xy);
-        if (startSec) {
-          int startIdx = startSec.sectornum;
-          int numSectors = level.sectors.Size();
-          parent.Resize(numSectors);
-          parentLine.Resize(numSectors);
-          reachable.Resize(numSectors);
-          gScore.Resize(numSectors);
-          fScore.Resize(numSectors);
-          inOpenSet.Resize(numSectors);
-
-          // Mark goal sectors
-          isGoal.Resize(numSectors);
-          for (int i = 0; i < numSectors; i++)
-            isGoal[i] = false;
-          for (int i = 0; i < keySectors.Size(); i++)
-            isGoal[keySectors[i]] = true;
-
-          int hitGoal =
-              RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo);
-          if (hitGoal < 0) {
-            hitGoal = RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo, true);
-          }
-          if (hitGoal >= 0) {
-            // Find which key actor lives in the hit sector
-            for (int i = 0; i < keyCandidates.Size(); i++) {
-              if (keySectors[i] == hitGoal) {
-                currentTarget = keyCandidates[i];
-                // Build the path from RunAStar's parent data
-                BuildPathFromParent(startIdx, hitGoal, keyCandidates[i]);
-                pathFresh = true;
-                return;
+            int hitGoal =
+                RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo);
+            if (hitGoal < 0) {
+              hitGoal = RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo, true);
+            }
+            if (hitGoal >= 0) {
+              // Find which key actor lives in the hit sector
+              for (int i = 0; i < keyCandidates.Size(); i++) {
+                if (keySectors[i] == hitGoal) {
+                  currentTarget = keyCandidates[i];
+                  // Build the path from RunAStar's parent data
+                  BuildPathFromParent(startIdx, hitGoal, keyCandidates[i]);
+                  pathFresh = true;
+                  return;
+                }
               }
             }
           }
         }
       }
+
+      // Pass 2 Fallback: Target level exits
+      if (cache_priority == 0 || cache_priority == 2) {
+
+        for (int i = 0; i < level.lines.Size(); i++) {
+          Line ln = level.lines[i];
+          if (ln && (ln.special == 243 || ln.special == 244 || ln.special == 74 ||
+                     ln.special == 124)) {
+            Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
+
+            // FIX: Push target 32 units away from the line into its front sector.
+            // This prevents pathfinding into tight switch crevices and walls.
+            if (ln.frontsector) {
+              Vector2 lineVec = ln.v2.p - ln.v1.p;
+              Vector2 normal =
+                  (lineVec.y, -lineVec.x)
+                      .Unit(); // Right hand normal points to front sector
+              midpoint = midpoint + normal * EXIT_NORMAL_PUSH;
+            }
+
+            Sector exitSec = level.PointInSector(midpoint);
+            if (!exitSec)
+              continue;
+
+            double z = exitSec.floorplane.ZatPoint(midpoint);
+            Actor spot = Actor.Spawn("MapSpot", (midpoint.x, midpoint.y, z));
+            if (spot) {
+              exitSpots.Push(spot);
+              exitSectors.Push(exitSec.sectornum);
+            }
+          }
+        }
+
+        int foundIdx = -1;
+        if (exitSpots.Size() > 0) {
+          Sector startSec = level.PointInSector(plyr.mo.pos.xy);
+          if (startSec) {
+            int startIdx = startSec.sectornum;
+            int numSectors = level.sectors.Size();
+            parent.Resize(numSectors);
+            parentLine.Resize(numSectors);
+            reachable.Resize(numSectors);
+            gScore.Resize(numSectors);
+            fScore.Resize(numSectors);
+            inOpenSet.Resize(numSectors);
+
+            isGoal.Resize(numSectors);
+            for (int i = 0; i < numSectors; i++)
+              isGoal[i] = false;
+            for (int i = 0; i < exitSectors.Size(); i++)
+              isGoal[exitSectors[i]] = true;
+
+            int hitGoal =
+                RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo);
+            if (hitGoal >= 0) {
+              for (int i = 0; i < exitSpots.Size(); i++) {
+                if (exitSectors[i] == hitGoal) {
+                  currentTarget = exitSpots[i];
+                  BuildPathFromParent(startIdx, hitGoal, exitSpots[i]);
+                  pathFresh = true;
+                  foundIdx = i;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        // Clean up all scratch actors except the one we're keeping
+        for (int i = 0; i < exitSpots.Size(); i++) {
+          if (i != foundIdx && exitSpots[i]) {
+            exitSpots[i].Destroy();
+          }
+        }
+        if (foundIdx >= 0)
+          return;
+      }
+
+      currentTarget = null;
     }
 
-    // Pass 2 Fallback: Target level exits
-    if (cache_priority == 0 || cache_priority == 2) {
-
-      for (int i = 0; i < level.lines.Size(); i++) {
-        Line ln = level.lines[i];
-        if (ln && (ln.special == 243 || ln.special == 244 || ln.special == 74 ||
-                   ln.special == 124)) {
-          Vector2 midpoint = (ln.v1.p + ln.v2.p) / 2.0;
-
-          // FIX: Push target 32 units away from the line into its front sector.
-          // This prevents pathfinding into tight switch crevices and walls.
-          if (ln.frontsector) {
-            Vector2 lineVec = ln.v2.p - ln.v1.p;
-            Vector2 normal =
-                (lineVec.y, -lineVec.x)
-                    .Unit(); // Right hand normal points to front sector
-            midpoint = midpoint + normal * EXIT_NORMAL_PUSH;
-          }
-
-          Sector exitSec = level.PointInSector(midpoint);
-          if (!exitSec)
-            continue;
-
-          double z = exitSec.floorplane.ZatPoint(midpoint);
+    // Mode 1: Secrets Hunt
+    if (cache_target_mode == 1) {
+      for (int i = 0; i < level.sectors.Size(); i++) {
+        Sector sec = level.sectors[i];
+        if (sec && (sec.flags & Sector.SECF_SECRET) && !(sec.flags & Sector.SECF_WASSECRET)) {
+          int snappedIdx = GetValidSnappedSector(sec.sectornum, null, plyr.mo);
+          Vector2 midpoint = sec.centerspot;
+          double z = sec.floorplane.ZatPoint(midpoint);
           Actor spot = Actor.Spawn("MapSpot", (midpoint.x, midpoint.y, z));
           if (spot) {
             exitSpots.Push(spot);
-            exitSectors.Push(exitSec.sectornum);
+            exitSectors.Push(snappedIdx);
           }
         }
       }
@@ -1026,6 +1120,9 @@ class HoloGPSHandler : StaticEventHandler {
 
           int hitGoal =
               RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo);
+          if (hitGoal < 0) {
+            hitGoal = RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo, true);
+          }
           if (hitGoal >= 0) {
             for (int i = 0; i < exitSpots.Size(); i++) {
               if (exitSectors[i] == hitGoal) {
@@ -1040,7 +1137,6 @@ class HoloGPSHandler : StaticEventHandler {
         }
       }
 
-      // Clean up all scratch actors except the one we're keeping
       for (int i = 0; i < exitSpots.Size(); i++) {
         if (i != foundIdx && exitSpots[i]) {
           exitSpots[i].Destroy();
@@ -1048,6 +1144,212 @@ class HoloGPSHandler : StaticEventHandler {
       }
       if (foundIdx >= 0)
         return;
+    }
+
+    // Mode 2: Purge Mode (Monsters)
+    if (cache_target_mode == 2) {
+      ThinkerIterator it = ThinkerIterator.Create("Actor");
+      Actor mo;
+      while (mo = Actor(it.Next())) {
+        if (!mo || mo.health <= 0)
+          continue;
+
+        if (mo.bISMONSTER && !mo.bFRIENDLY && !mo.bDORMANT) {
+          Sector mSec = level.PointInSector(mo.pos.xy);
+          if (mSec) {
+            int snappedIdx = GetValidSnappedSector(mSec.sectornum, mo, plyr.mo);
+            keyCandidates.Push(mo);
+            keySectors.Push(snappedIdx);
+          }
+        }
+      }
+
+      if (keyCandidates.Size() > 0) {
+        Sector startSec = level.PointInSector(plyr.mo.pos.xy);
+        if (startSec) {
+          int startIdx = startSec.sectornum;
+          int numSectors = level.sectors.Size();
+          parent.Resize(numSectors);
+          parentLine.Resize(numSectors);
+          reachable.Resize(numSectors);
+          gScore.Resize(numSectors);
+          fScore.Resize(numSectors);
+          inOpenSet.Resize(numSectors);
+
+          isGoal.Resize(numSectors);
+          for (int i = 0; i < numSectors; i++)
+            isGoal[i] = false;
+          for (int i = 0; i < keySectors.Size(); i++)
+            isGoal[keySectors[i]] = true;
+
+          int hitGoal =
+              RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo);
+          if (hitGoal < 0) {
+            hitGoal = RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo, true);
+          }
+          if (hitGoal >= 0) {
+            for (int i = 0; i < keyCandidates.Size(); i++) {
+              if (keySectors[i] == hitGoal) {
+                currentTarget = keyCandidates[i];
+                BuildPathFromParent(startIdx, hitGoal, keyCandidates[i]);
+                pathFresh = true;
+                return;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Mode 3: Scavenger Mode (Items)
+    if (cache_target_mode == 3) {
+      ThinkerIterator it = ThinkerIterator.Create("Inventory");
+      Inventory inv;
+      while (inv = Inventory(it.Next())) {
+        if (!inv || inv.owner)
+          continue;
+
+        bool isScavengeable = false;
+        if (inv is "Weapon") {
+          if (!plyr.mo.FindInventory(inv.GetClass())) {
+            isScavengeable = true;
+          }
+        } else if (inv is "BackpackItem") {
+          if (!plyr.mo.FindInventory("BackpackItem")) {
+            isScavengeable = true;
+          }
+        } else if (inv is "Megasphere") {
+          let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
+          int currentArmor = (armor != null) ? armor.Amount : 0;
+          if (plyr.mo.health < 200 || currentArmor < 200) {
+            isScavengeable = true;
+          }
+        } else if (inv is "Berserk") {
+          if (plyr.mo.health < 100 || !plyr.mo.FindInventory("PowerStrength")) {
+            isScavengeable = true;
+          }
+        } else if (inv is "Health") {
+          let hp = Health(inv);
+          int max_limit = hp.MaxAmount;
+          if (max_limit <= 0) {
+            max_limit = plyr.mo.GetMaxHealth();
+          }
+          if (inv is "MaxHealth") {
+            let mhp = MaxHealth(inv);
+            let pPawn = PlayerPawn(plyr.mo);
+            if (pPawn && pPawn.BonusHealth < mhp.MaxAmount) {
+              isScavengeable = true;
+            } else if (plyr.mo.health < max_limit) {
+              isScavengeable = true;
+            }
+          } else {
+            if (plyr.mo.health < max_limit) {
+              isScavengeable = true;
+            }
+          }
+        } else if (inv is "BasicArmorPickup") {
+          let ap = BasicArmorPickup(inv);
+          let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
+          int currentArmor = (armor != null) ? armor.Amount : 0;
+          int bonusCount = (armor != null) ? armor.BonusCount : 0;
+          int apSaveAmount = ap.GetSaveAmount();
+          int maxAllowed = apSaveAmount + bonusCount;
+          if (armor != null && armor.MaxAllowedAmount) {
+            maxAllowed = armor.MaxAllowedAmount;
+          }
+          if (currentArmor < maxAllowed) {
+            isScavengeable = true;
+          }
+        } else if (inv is "BasicArmorBonus") {
+          let ab = BasicArmorBonus(inv);
+          let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
+          int currentArmor = (armor != null) ? armor.Amount : 0;
+          int bonusCount = (armor != null) ? armor.BonusCount : 0;
+          int maxAllowed = ab.MaxSaveAmount + bonusCount;
+          if (armor != null && armor.MaxAllowedAmount) {
+            maxAllowed = armor.MaxAllowedAmount;
+          }
+          if (currentArmor < maxAllowed) {
+            isScavengeable = true;
+          }
+        } else if (inv is "HexenArmor") {
+          let ha = HexenArmor(inv);
+          let playerha = HexenArmor(plyr.mo.FindInventory("HexenArmor", true));
+          if (playerha == null) {
+            isScavengeable = true;
+          } else {
+            int slot = ha.Health;
+            int amount = ha.Amount;
+            double hits = (amount <= 0) ? playerha.SlotsIncrement[slot] : amount * 5;
+            if (amount <= 0) {
+              if (playerha.Slots[slot] < hits) {
+                isScavengeable = true;
+              }
+            } else {
+              double total = playerha.Slots[0] + playerha.Slots[1] + playerha.Slots[2] + playerha.Slots[3] + playerha.Slots[4];
+              double max = playerha.SlotsIncrement[0] + playerha.SlotsIncrement[1] + playerha.SlotsIncrement[2] + playerha.SlotsIncrement[3] + playerha.Slots[4] + 20;
+              if (total < max) {
+                isScavengeable = true;
+              }
+            }
+          }
+        } else if (inv is "Ammo") {
+          let parentType = Ammo(inv).GetParentAmmo();
+          if (parentType) {
+            let playerAmmo = Ammo(plyr.mo.FindInventory(parentType));
+            if (!playerAmmo || playerAmmo.Amount < playerAmmo.MaxAmount) {
+              isScavengeable = true;
+            }
+          }
+        } else if (inv is "Armor") {
+          isScavengeable = true;
+        }
+
+        if (isScavengeable) {
+          Sector iSec = level.PointInSector(inv.pos.xy);
+          if (iSec) {
+            int snappedIdx = GetValidSnappedSector(iSec.sectornum, inv, plyr.mo);
+            keyCandidates.Push(inv);
+            keySectors.Push(snappedIdx);
+          }
+        }
+      }
+
+      if (keyCandidates.Size() > 0) {
+        Sector startSec = level.PointInSector(plyr.mo.pos.xy);
+        if (startSec) {
+          int startIdx = startSec.sectornum;
+          int numSectors = level.sectors.Size();
+          parent.Resize(numSectors);
+          parentLine.Resize(numSectors);
+          reachable.Resize(numSectors);
+          gScore.Resize(numSectors);
+          fScore.Resize(numSectors);
+          inOpenSet.Resize(numSectors);
+
+          isGoal.Resize(numSectors);
+          for (int i = 0; i < numSectors; i++)
+            isGoal[i] = false;
+          for (int i = 0; i < keySectors.Size(); i++)
+            isGoal[keySectors[i]] = true;
+
+          int hitGoal =
+              RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo);
+          if (hitGoal < 0) {
+            hitGoal = RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo, true);
+          }
+          if (hitGoal >= 0) {
+            for (int i = 0; i < keyCandidates.Size(); i++) {
+              if (keySectors[i] == hitGoal) {
+                currentTarget = keyCandidates[i];
+                BuildPathFromParent(startIdx, hitGoal, keyCandidates[i]);
+                pathFresh = true;
+                return;
+              }
+            }
+          }
+        }
+      }
     }
 
     currentTarget = null;
@@ -1068,7 +1370,7 @@ class HoloGPSHandler : StaticEventHandler {
 
     if (ln.flags & Line.ML_BLOCKING)
       return false;
-    if (!cache_use_secrets && (ln.flags & Line.ML_SECRET))
+    if (cache_target_mode != 1 && !cache_use_secrets && (ln.flags & Line.ML_SECRET))
       return false;
 
     if (ln.locknumber != 0) {
@@ -1942,6 +2244,22 @@ class HoloGPSHandler : StaticEventHandler {
     }
   }
 
+  // Checks if a sector is considered hazardous (damaging floor or active crusher)
+  bool IsSectorHazardous(Sector sec) {
+    if (!sec)
+      return false;
+
+    // Check for damaging floor
+    if (sec.damageamount > 0)
+      return true;
+
+    // Check for active ceiling movement (e.g. crusher)
+    if (sec.ceilingdata != null)
+      return true;
+
+    return false;
+  }
+
   void SpawnPathMarkers(Actor player) {
     if (refinedX.Size() == 0 || !player)
       return;
@@ -2041,7 +2359,11 @@ class HoloGPSHandler : StaticEventHandler {
               (cache_style == 1) ? STYLE_TranslucentStencil : STYLE_AddStencil;
           int defaultStyle = (cache_style == 1) ? STYLE_Translucent : STYLE_Add;
 
-          if (cache_color == 9) {
+          bool isHazard = IsSectorHazardous(spawnSec);
+          if (isHazard) {
+            marker.A_SetRenderStyle(markerAlpha, renderStyle);
+            marker.SetShade(0xFF0000); // Red for hazard!
+          } else if (cache_color == 9) {
             marker.A_SetRenderStyle(markerAlpha, renderStyle);
             marker.SetShade(TRANS_COLORS[spawnedCount % 4]);
           } else if (cache_color >= 1 && cache_color <= 8) {

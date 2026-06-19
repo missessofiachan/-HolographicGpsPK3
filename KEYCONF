@@ -1,3 +1,6 @@
 addkeysection "Holographic GPS" HoloGPSSection
 addmenukey "Toggle Navigation Path" holo_gps_toggle
 alias holo_gps_toggle "toggle holo_gps_enabled"
+addmenukey "Cycle Navigation Mode" holo_gps_cycle
+alias holo_gps_cycle "netevent cycle_gps_mode"
+defaultbind holo_gps_cycle mouse4

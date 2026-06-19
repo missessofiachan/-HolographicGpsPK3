@@ -10,6 +10,7 @@ user int    holo_gps_color = 0;           // Trail color: 0=Default, 1-8=Custom,
 user float  holo_gps_scale = 0.25;        // Size of the markers
 user float  holo_gps_height = 1.0;        // Float height from the floor
 user int    holo_gps_priority = 0;        // 0=Auto, 1=Keys Only, 2=Exits Only
+user int    holo_gps_target_mode = 0;     // Navigation Mode: 0=Default, 1=Secrets, 2=Monsters, 3=Items
 user int    holo_gps_style = 0;           // 0=Additive, 1=Translucent
 user bool   holo_gps_extended_search = true; // Find custom non-standard keys
 user bool   holo_gps_wolfendoom_compat = false; // WolfenDoom compatibility mode
