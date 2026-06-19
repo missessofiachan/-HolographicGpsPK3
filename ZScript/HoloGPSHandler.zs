@@ -50,11 +50,15 @@ class HoloGPSHandler : StaticEventHandler {
   // Trans pride flag cycle: blue, pink, white, pink
   static const color TRANS_COLORS[] = {0x5BCEFA, 0xF5A9B8, 0xFFFFFF, 0xF5A9B8};
 
+  static CVar cv_3dfloors_static;
+  static CVar cv_step_max_static;
+
   Actor currentTarget;
   int tickCounter;
   bool pathFresh; // True when FindNextObjective just found a target (path
                   // already computed)
   Array<Actor> activeMarkers;
+  bool lastPortalNormallyBlocked;
 
   // Consolidated reusable tracer instance to avoid garbage collector load
   PathfinderTracer mTracer;
@@ -184,6 +188,12 @@ class HoloGPSHandler : StaticEventHandler {
   Array<double>
       sectorZ; // Cached Z height for each sector reached in A* search; used to
                // propagate vertical level across 3D floors/bridges
+
+  Array<Actor> keyCandidates;
+  Array<int> keySectors;
+  Array<bool> isGoal;
+  Array<Actor> exitSpots;
+  Array<int> exitSectors;
 
   // Persistent helper arrays for reverse topological fallback search
   Array<int> visitedReverse;
@@ -671,8 +681,10 @@ class HoloGPSHandler : StaticEventHandler {
     }
 
     cache_enabled = cv_enabled.GetBool();
-    if (!cache_enabled)
+    if (!cache_enabled) {
+      ClearOldMarkers();
       return;
+    }
 
     if (cache_sr_monster_avoidance && graphBuilt == 1) {
       monsterScanTick++;
@@ -861,11 +873,14 @@ class HoloGPSHandler : StaticEventHandler {
     if (!plyr || !plyr.mo)
       return;
 
+    keyCandidates.Clear();
+    keySectors.Clear();
+    isGoal.Clear();
+    exitSpots.Clear();
+    exitSectors.Clear();
+
     // Pass 1: Find valid, reachable Keys using single multi-target search
     if (cache_priority == 0 || cache_priority == 1) {
-      // Collect all uncollected key candidates and their sectors
-      Array<Actor> keyCandidates;
-      Array<int> keySectors;
 
       ThinkerIterator it = ThinkerIterator.Create(
           (cache_extended_search || cache_wolfendoom_compat) ? "Inventory"
@@ -931,7 +946,6 @@ class HoloGPSHandler : StaticEventHandler {
           inOpenSet.Resize(numSectors);
 
           // Mark goal sectors
-          Array<bool> isGoal;
           isGoal.Resize(numSectors);
           for (int i = 0; i < numSectors; i++)
             isGoal[i] = false;
@@ -940,6 +954,9 @@ class HoloGPSHandler : StaticEventHandler {
 
           int hitGoal =
               RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo);
+          if (hitGoal < 0) {
+            hitGoal = RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo, true);
+          }
           if (hitGoal >= 0) {
             // Find which key actor lives in the hit sector
             for (int i = 0; i < keyCandidates.Size(); i++) {
@@ -958,8 +975,6 @@ class HoloGPSHandler : StaticEventHandler {
 
     // Pass 2 Fallback: Target level exits
     if (cache_priority == 0 || cache_priority == 2) {
-      Array<Actor> exitSpots;
-      Array<int> exitSectors;
 
       for (int i = 0; i < level.lines.Size(); i++) {
         Line ln = level.lines[i];
@@ -1003,7 +1018,6 @@ class HoloGPSHandler : StaticEventHandler {
           fScore.Resize(numSectors);
           inOpenSet.Resize(numSectors);
 
-          Array<bool> isGoal;
           isGoal.Resize(numSectors);
           for (int i = 0; i < numSectors; i++)
             isGoal[i] = false;
@@ -1044,7 +1058,8 @@ class HoloGPSHandler : StaticEventHandler {
   // and step heights. Propagates vertical level (refZ) to calculate and output
   // nextFloor for the neighboring sector.
   bool IsPortalPassable(Sector curSec, Sector nextSec, Line ln, Actor player,
-                        double refZ, out double nextFloor, out double nextCeil, bool isProven = false) {
+                        double refZ, out double nextFloor, out double nextCeil, bool isProven = false, bool ignoreLocks = false) {
+    lastPortalNormallyBlocked = false;
     nextFloor = nextSec.floorplane.ZatPoint(ln.v1.p); 
     nextCeil = nextFloor + 128.0;
 
@@ -1059,7 +1074,8 @@ class HoloGPSHandler : StaticEventHandler {
     if (ln.locknumber != 0) {
       PlayerPawn plyrPawn = PlayerPawn(player);
       if (plyrPawn && !plyrPawn.CheckKeys(ln.locknumber, false, true)) {
-        return false;
+        if (!ignoreLocks) return false;
+        lastPortalNormallyBlocked = true;
       }
     }
 
@@ -1077,8 +1093,10 @@ class HoloGPSHandler : StaticEventHandler {
     // (e.g. crossing a bridge vs under it).
     GetEffectiveFloorCeil(nextSec, nextMidpoint, curFloor, nextFloor, nextCeil);
 
-    if (abs(nextFloor - curFloor) > cache_step_max)
-      return false;
+    if (abs(nextFloor - curFloor) > cache_step_max) {
+      if (!ignoreLocks) return false;
+      lastPortalNormallyBlocked = true;
+    }
 
     double portalFloor = (curFloor > nextFloor) ? curFloor : nextFloor;
     double portalCeil = (curCeil < nextCeil) ? curCeil : nextCeil;
@@ -1098,15 +1116,18 @@ class HoloGPSHandler : StaticEventHandler {
         if (!isDirectUse && !isStandardDoor && !isScriptDoor) {
           // If it's a remote door and it's currently closed, we cannot pass it
           // even if we proved it earlier when it was open!
-          return false;
+          if (!ignoreLocks) return false;
+          lastPortalNormallyBlocked = true;
         }
       }
     }
 
     if (isProven) return true;
 
-    if (abs(nextFloor - curFloor) > cache_step_max)
-      return false;
+    if (abs(nextFloor - curFloor) > cache_step_max) {
+      if (!ignoreLocks) return false;
+      lastPortalNormallyBlocked = true;
+    }
 
     return true;
   }
@@ -1321,7 +1342,7 @@ class HoloGPSHandler : StaticEventHandler {
   // Unified A* / Dijkstra pathfinder. 
   // If goalIdx >= 0, it uses A* heuristic to target targetPos and returns 1 on success.
   // If goalIdx == -1, it uses pure Dijkstra to hit any true value in isGoal and returns the hit sector index.
-  int RunPathfinder(int startIdx, int goalIdx, in out Array<bool> isGoal, Vector2 targetPos, Actor player) {
+  int RunPathfinder(int startIdx, int goalIdx, in out Array<bool> isGoal, Vector2 targetPos, Actor player, bool ignoreLocks = false) {
     int numSectors = level.sectors.Size();
     openSet.Clear();
     heapPos.Resize(numSectors);
@@ -1367,7 +1388,7 @@ class HoloGPSHandler : StaticEventHandler {
         double nextFloor;
         double nextCeil;
         bool isProven = (cache_learning_proven && adjProven[ni]);
-        bool isPassable = IsPortalPassable(curSec, nextSec, ln, player, sectorZ[current], nextFloor, nextCeil, isProven);
+        bool isPassable = IsPortalPassable(curSec, nextSec, ln, player, sectorZ[current], nextFloor, nextCeil, isProven, ignoreLocks);
 
         if (isPassable) {
           double dist = ln.isLinePortal()
@@ -1397,6 +1418,14 @@ class HoloGPSHandler : StaticEventHandler {
 
           double speedCostAdd = 0.0;
           double speedCostMul = 1.0;
+
+          if (ignoreLocks && lastPortalNormallyBlocked) {
+            if (ln.locknumber != 0) {
+              speedCostAdd += 100000.0;
+            } else {
+              speedCostAdd += 10000.0;
+            }
+          }
 
           if (cache_sr_momentum && parent[current] != -1) {
             Vector2 v1 = curSec.centerspot - level.sectors[parent[current]].centerspot;
@@ -1638,15 +1667,20 @@ class HoloGPSHandler : StaticEventHandler {
     floorZ = sec.floorplane.ZatPoint(pos);
     ceilZ = sec.ceilingplane.ZatPoint(pos);
 
-    PlayerInfo plyr = players[consoleplayer];
-    double stepMax = 24.0;
-    if (plyr) {
-      CVar cv3d = CVar.GetCVar("holo_gps_3dfloors", plyr);
-      if (cv3d && !cv3d.GetBool()) {
-        return;
+    if (!cv_3dfloors_static || !cv_step_max_static) {
+      PlayerInfo plyr = players[consoleplayer];
+      if (plyr) {
+        if (!cv_3dfloors_static) cv_3dfloors_static = CVar.GetCVar("holo_gps_3dfloors", plyr);
+        if (!cv_step_max_static) cv_step_max_static = CVar.GetCVar("holo_gps_step_max", plyr);
       }
-      CVar cvStep = CVar.GetCVar("holo_gps_step_max", plyr);
-      if (cvStep) stepMax = cvStep.GetFloat();
+    }
+
+    double stepMax = 24.0;
+    if (cv_3dfloors_static && !cv_3dfloors_static.GetBool()) {
+      return;
+    }
+    if (cv_step_max_static) {
+      stepMax = cv_step_max_static.GetFloat();
     }
 
     int count = sec.Get3DFloorCount();
@@ -1708,6 +1742,8 @@ class HoloGPSHandler : StaticEventHandler {
       return false;
 
     // Trace ray using PathfinderTracer
+    mTracer.clearanceMin = cache_clearance_min;
+    mTracer.stepMax = cache_step_max;
     mTracer.Trace(pA, sec, dir, len, TRACE_ReportPortals, 0xFFFFFFFF, true);
     if (mTracer.Results.HitType != TRACE_HitNone)
       return true;
@@ -1794,7 +1830,7 @@ class HoloGPSHandler : StaticEventHandler {
   // refining the path to wrap smoothly around corners.
   bool GetDetourPath(Vector2 A, Vector2 B, in out Array<double> outX,
                      in out Array<double> outY, double refZ, int depth = 0) {
-    if (depth > 3 || !mTracer)
+    if (depth > 2 || !mTracer)
       return false;
 
     double floorzA = GetFloorZ(A, refZ);
@@ -1813,6 +1849,8 @@ class HoloGPSHandler : StaticEventHandler {
     if (!sec)
       return false;
 
+    mTracer.clearanceMin = cache_clearance_min;
+    mTracer.stepMax = cache_step_max;
     mTracer.Trace(start, sec, dir, len, TRACE_ReportPortals, 0xFFFFFFFF, true);
     if (mTracer.Results.HitType == TRACE_HitNone)
       return true;
@@ -2030,8 +2068,8 @@ class HoloGPSHandler : StaticEventHandler {
       prevPoint = waypoint;
     }
 
-    // Destroy excess pooled markers beyond what we used this frame
-    for (int i = activeMarkers.Size() - 1; i >= spawnedCount; i--) {
+    // Destroy excess pooled markers if the user reduced cache_max_markers dynamically
+    for (int i = activeMarkers.Size() - 1; i >= cache_max_markers; i--) {
       if (activeMarkers[i] && !activeMarkers[i].bDestroyed) {
         activeMarkers[i].Destroy();
       }

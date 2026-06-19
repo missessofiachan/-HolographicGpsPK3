@@ -7,6 +7,9 @@
 // - When crossing a portal/linedef boundary, it verifies the clearance and step heights relative to the crossing point's vertical Z position.
 class PathfinderTracer : LineTracer
 {
+    double clearanceMin;
+    double stepMax;
+
     override ETraceStatus TraceCallback()
     {
         if (Results.HitType == TRACE_HitWall) return TRACE_Stop;
@@ -49,12 +52,15 @@ class PathfinderTracer : LineTracer
                     HoloGPSHandler.GetEffectiveFloorCeil(front, hitPt, Results.HitPos.z, fFloor, fCeil);
                     HoloGPSHandler.GetEffectiveFloorCeil(back, destHitPt, Results.HitPos.z, bFloor, bCeil);
 
-                    if ((fCeil - fFloor < 56.0) || (bCeil - bFloor < 56.0))
+                    double clMin = (clearanceMin > 0.0) ? clearanceMin : 56.0;
+                    double stMax = (stepMax > 0.0) ? stepMax : 24.0;
+
+                    if ((fCeil - fFloor < clMin) || (bCeil - bFloor < clMin))
                     {
                         return TRACE_Stop;
                     }
 
-                    if ((fFloor - bFloor > 24.0) || (bFloor - fFloor > 24.0))
+                    if ((fFloor - bFloor > stMax) || (bFloor - fFloor > stMax))
                     {
                         return TRACE_Stop;
                     }
