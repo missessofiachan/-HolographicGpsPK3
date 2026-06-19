@@ -7,6 +7,7 @@
 // - When crossing a portal/linedef boundary, it verifies the clearance and step heights relative to the crossing point's vertical Z position.
 class PathfinderTracer : LineTracer
 {
+    HoloGPSHandler handler;
     double clearanceMin;
     double stepMax;
 
@@ -49,8 +50,20 @@ class PathfinderTracer : LineTracer
                     // Retrieve effective floor and ceiling Z heights using the trace's exact 3D crossing height (Results.HitPos.z)
                     // as the reference Z. This ensures the tracer correctly evaluates the matching vertical slice
                     // of stacked 3D geometry (like bridges or portals).
-                    HoloGPSHandler.GetEffectiveFloorCeil(front, hitPt, Results.HitPos.z, fFloor, fCeil);
-                    HoloGPSHandler.GetEffectiveFloorCeil(back, destHitPt, Results.HitPos.z, bFloor, bCeil);
+                    if (handler)
+                    {
+                        handler.GetEffectiveFloorCeil(front, hitPt, Results.HitPos.z, fFloor, fCeil);
+                        handler.GetEffectiveFloorCeil(back, destHitPt, Results.HitPos.z, bFloor, bCeil);
+                    }
+                    else
+                    {
+                        let h = HoloGPSHandler(StaticEventHandler.Find("HoloGPSHandler"));
+                        if (h)
+                        {
+                            h.GetEffectiveFloorCeil(front, hitPt, Results.HitPos.z, fFloor, fCeil);
+                            h.GetEffectiveFloorCeil(back, destHitPt, Results.HitPos.z, bFloor, bCeil);
+                        }
+                    }
 
                     double clMin = (clearanceMin > 0.0) ? clearanceMin : 56.0;
                     double stMax = (stepMax > 0.0) ? stepMax : 24.0;

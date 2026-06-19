@@ -50,8 +50,7 @@ class HoloGPSHandler : StaticEventHandler {
   // Trans pride flag cycle: blue, pink, white, pink
   static const color TRANS_COLORS[] = {0x5BCEFA, 0xF5A9B8, 0xFFFFFF, 0xF5A9B8};
 
-  static CVar cv_3dfloors_static;
-  static CVar cv_step_max_static;
+
 
   Actor currentTarget;
   int tickCounter;
@@ -424,6 +423,7 @@ class HoloGPSHandler : StaticEventHandler {
     } 
 
     mTracer = new("PathfinderTracer");
+    mTracer.handler = self;
 
     ykeySprite = Actor.GetSpriteIndex("YKEY");
     bkeySprite = Actor.GetSpriteIndex("BKEY");
@@ -1661,26 +1661,18 @@ class HoloGPSHandler : StaticEventHandler {
   // - Finds the lowest ceiling (or bottom of a 3D floor) directly above refZ.
   // This allows the pathfinder and tracer to distinguish between stacked 3D
   // levels (e.g. on a bridge vs under it).
-  clearscope static void GetEffectiveFloorCeil(Sector sec, Vector2 pos,
-                                               double refZ, out double floorZ,
-                                               out double ceilZ) {
+  clearscope void GetEffectiveFloorCeil(Sector sec, Vector2 pos,
+                                         double refZ, out double floorZ,
+                                         out double ceilZ) {
     floorZ = sec.floorplane.ZatPoint(pos);
     ceilZ = sec.ceilingplane.ZatPoint(pos);
 
-    if (!cv_3dfloors_static || !cv_step_max_static) {
-      PlayerInfo plyr = players[consoleplayer];
-      if (plyr) {
-        if (!cv_3dfloors_static) cv_3dfloors_static = CVar.GetCVar("holo_gps_3dfloors", plyr);
-        if (!cv_step_max_static) cv_step_max_static = CVar.GetCVar("holo_gps_step_max", plyr);
-      }
-    }
-
     double stepMax = 24.0;
-    if (cv_3dfloors_static && !cv_3dfloors_static.GetBool()) {
+    if (cv_3dfloors && !cv_3dfloors.GetBool()) {
       return;
     }
-    if (cv_step_max_static) {
-      stepMax = cv_step_max_static.GetFloat();
+    if (cv_step_max) {
+      stepMax = cv_step_max.GetFloat();
     }
 
     int count = sec.Get3DFloorCount();
