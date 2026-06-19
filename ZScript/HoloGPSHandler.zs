@@ -443,8 +443,15 @@ class HoloGPSHandler : StaticEventHandler {
     PlayerInfo plyr = players[consoleplayer];
     bool usePersistent = false;
     if (plyr) {
-      CVar cv = CVar.GetCVar("holo_gps_learning_persistent", plyr);
-      if (cv) usePersistent = cv.GetBool();
+      InitCVars(plyr);
+      cache_learning_persistent = cv_learning_persistent.GetBool();
+      cache_priority = cv_priority.GetInt();
+      cache_target_mode = cv_target_mode.GetInt();
+      cache_extended_search = cv_extended_search.GetBool();
+      cache_wolfendoom_compat = cv_wolfendoom_compat.GetBool();
+      cache_clearance_min = cv_clearance_min.GetFloat();
+      cache_step_max = cv_step_max.GetFloat();
+      usePersistent = cache_learning_persistent;
     }
 
     if (usePersistent && lastMapName != "") {
@@ -1169,6 +1176,9 @@ class HoloGPSHandler : StaticEventHandler {
 
             int hitGoal =
                 RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo);
+            if (hitGoal < 0) {
+              hitGoal = RunPathfinder(startIdx, -1, isGoal, plyr.mo.pos.xy, plyr.mo, true);
+            }
             if (hitGoal >= 0) {
               for (int i = 0; i < exitSpots.Size(); i++) {
                 if (exitSectors[i] == hitGoal) {
