@@ -60,6 +60,7 @@ class PathfinderTracer : LineTracer
                         let h = HoloGPSHandler(StaticEventHandler.Find("HoloGPSHandler"));
                         if (h)
                         {
+                            handler = h; // Cache reference to avoid future lookup overhead
                             h.GetEffectiveFloorCeil(front, hitPt, Results.HitPos.z, fFloor, fCeil);
                             h.GetEffectiveFloorCeil(back, destHitPt, Results.HitPos.z, bFloor, bCeil);
                         }

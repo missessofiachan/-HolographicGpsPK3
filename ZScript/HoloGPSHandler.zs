@@ -6,6 +6,14 @@ class HoloMapKnowledge : Object {
   Array<double> sectorPheromone;
 }
 
+// Represents custom scavenger item definitions loaded from mod configuration lumps.
+class HoloGPSCustomItem : Object {
+  string className;
+  int itemType; // 0 = Key, 1 = Health, 2 = Armor, 3 = Ammo, 4 = Backpack, 5 = Megasphere, 6 = Berserk
+  int maxLimit;
+}
+
+
 // HoloGPSHandler is a StaticEventHandler that coordinates the pathfinding and
 // marker projection logic. Design & Implementation Details:
 // - Adjacency Graph: Pre-built once per map load (`BuildAdjacencyGraph`) using
@@ -55,9 +63,11 @@ class HoloGPSHandler : StaticEventHandler {
   Actor currentTarget;
   int tickCounter;
   int lastTargetMode;
+  bool lastUseParticles;
   bool pathFresh; // True when FindNextObjective just found a target (path
                   // already computed)
   Array<Actor> activeMarkers;
+  Array<HoloGPSCustomItem> customItems;
   bool lastPortalNormallyBlocked;
 
   // Consolidated reusable tracer instance to avoid garbage collector load
@@ -79,6 +89,7 @@ class HoloGPSHandler : StaticEventHandler {
   CVar cv_style;
   CVar cv_extended_search;
   CVar cv_wolfendoom_compat;
+  CVar cv_use_particles;
   CVar cv_hazard_avoidance;
   CVar cv_target_snapping;
   CVar cv_raycast_detouring;
@@ -122,6 +133,7 @@ class HoloGPSHandler : StaticEventHandler {
   int cache_style;
   bool cache_extended_search;
   bool cache_wolfendoom_compat;
+  bool cache_use_particles;
   bool cache_hazard_avoidance;
   bool cache_target_snapping;
   bool cache_raycast_detouring;
@@ -318,9 +330,113 @@ class HoloGPSHandler : StaticEventHandler {
                  }
                }
             }
-         }
+          }
+       }
+     }
+   }
+
+  override void OnRegister() {
+    ParseHoloGPSLumps();
+  }
+
+  void ParseHoloGPSLumps() {
+    customItems.Clear();
+    int lump = -1;
+    while ((lump = Wads.FindLump("HOLOGPS", lump + 1)) != -1) {
+      string content = Wads.ReadLump(lump);
+      Array<string> lines;
+      content.Split(lines, "\n");
+      for (int i = 0; i < lines.Size(); i++) {
+        string line = lines[i];
+        line.StripLeftRight();
+        if (line.Length() == 0 || line.Left(2) == "//" || line.Left(1) == "#") {
+          continue;
+        }
+
+        Array<string> parts;
+        line.Split(parts, "=");
+        if (parts.Size() != 2) {
+          continue;
+        }
+
+        string keyPart = parts[0];
+        keyPart.StripLeftRight();
+        keyPart = keyPart.MakeLower();
+
+        string valPart = parts[1];
+        valPart.StripLeftRight();
+
+        Array<string> valParts;
+        valPart.Split(valParts, ",");
+        if (valParts.Size() == 0) continue;
+
+        string className = valParts[0];
+        className.StripLeftRight();
+        int maxLimit = 0;
+        if (valParts.Size() > 1) {
+          string maxStr = valParts[1];
+          maxStr.StripLeftRight();
+          maxLimit = maxStr.ToInt();
+        }
+
+        int itemType = -1;
+        if (keyPart == "key") {
+          itemType = 0;
+        } else if (keyPart == "health") {
+          itemType = 1;
+        } else if (keyPart == "armor") {
+          itemType = 2;
+        } else if (keyPart == "ammo") {
+          itemType = 3;
+        } else if (keyPart == "backpack") {
+          itemType = 4;
+        } else if (keyPart == "megasphere") {
+          itemType = 5;
+        } else if (keyPart == "berserk") {
+          itemType = 6;
+        }
+
+        if (itemType >= 0) {
+          HoloGPSCustomItem cItem = new("HoloGPSCustomItem");
+          cItem.className = className;
+          cItem.itemType = itemType;
+          cItem.maxLimit = maxLimit;
+          customItems.Push(cItem);
+        }
       }
     }
+  }
+
+  bool GetCustomItemType(Actor act, out int customType, out int customMax) {
+    customType = -1;
+    customMax = 0;
+    if (!act) return false;
+    
+    string actClassName = act.GetClassName();
+    actClassName = actClassName.MakeLower();
+    
+    // First try exact string name match
+    for (int i = 0; i < customItems.Size(); i++) {
+      string targetName = customItems[i].className;
+      targetName = targetName.MakeLower();
+      if (actClassName == targetName) {
+        customType = customItems[i].itemType;
+        customMax = customItems[i].maxLimit;
+        return true;
+      }
+    }
+    
+    // Then try subclass match via class pointer
+    class<Actor> actClass = act.GetClass();
+    for (int i = 0; i < customItems.Size(); i++) {
+      class<Actor> targetClass = (class<Actor>)(customItems[i].className);
+      if (targetClass && actClass is targetClass) {
+        customType = customItems[i].itemType;
+        customMax = customItems[i].maxLimit;
+        return true;
+      }
+    }
+    return false;
   }
 
   override void WorldLoaded(WorldEvent e) {
@@ -377,12 +493,10 @@ class HoloGPSHandler : StaticEventHandler {
     string currentMap = GetMapHash();
     lastMapName = currentMap;
 
-    if (plyr) {
-      CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyr);
-      if (cvBlob) {
-        Console.Printf("HoloGPS Debug: Loaded CVAR string length is %d", cvBlob.GetString().Length());
-        DeserializeLearningData(cvBlob.GetString());
-      }
+    CVar cvBlob = CVar.FindCVar("holo_gps_memory_blob");
+    if (cvBlob) {
+      Console.Printf("HoloGPS Debug: Loaded CVAR string length is %d", cvBlob.GetString().Length());
+      DeserializeLearningData(cvBlob.GetString());
     }
 
     int numSectors = level.sectors.Size();
@@ -559,7 +673,7 @@ class HoloGPSHandler : StaticEventHandler {
     if (cv_enabled)
       return;
     cv_enabled = CVar.GetCVar("holo_gps_enabled", plyr);
-    cv_target_mode = CVar.GetCVar("holo_gps_target_mode", plyr);
+    cv_target_mode = CVar.FindCVar("holo_gps_target_mode");
     cv_freq = CVar.GetCVar("holo_gps_freq", plyr);
     cv_use_secrets = CVar.GetCVar("holo_gps_use_secrets", plyr);
     cv_alpha = CVar.GetCVar("holo_gps_alpha", plyr);
@@ -573,6 +687,7 @@ class HoloGPSHandler : StaticEventHandler {
     cv_style = CVar.GetCVar("holo_gps_style", plyr);
     cv_extended_search = CVar.GetCVar("holo_gps_extended_search", plyr);
     cv_wolfendoom_compat = CVar.GetCVar("holo_gps_wolfendoom_compat", plyr);
+    cv_use_particles = CVar.GetCVar("holo_gps_use_particles", plyr);
     cv_hazard_avoidance = CVar.GetCVar("holo_gps_hazard_avoidance", plyr);
     cv_target_snapping = CVar.GetCVar("holo_gps_target_snapping", plyr);
     cv_raycast_detouring = CVar.GetCVar("holo_gps_raycast_detouring", plyr);
@@ -730,6 +845,7 @@ class HoloGPSHandler : StaticEventHandler {
     cache_style = cv_style.GetInt();
     cache_extended_search = cv_extended_search.GetBool();
     cache_wolfendoom_compat = cv_wolfendoom_compat.GetBool();
+    cache_use_particles = cv_use_particles.GetBool();
     cache_hazard_avoidance = cv_hazard_avoidance.GetBool();
     cache_target_snapping = cv_target_snapping.GetBool();
     cache_raycast_detouring = cv_raycast_detouring.GetBool();
@@ -741,6 +857,11 @@ class HoloGPSHandler : StaticEventHandler {
     if (cache_target_mode != lastTargetMode) {
       currentTarget = null;
       lastTargetMode = cache_target_mode;
+    }
+
+    if (cache_use_particles != lastUseParticles) {
+      ClearOldMarkers();
+      lastUseParticles = cache_use_particles;
     }
 
     if (currentTarget) {
@@ -789,7 +910,7 @@ class HoloGPSHandler : StaticEventHandler {
          sessionKnowledge.Push(curMap);
       }
       curMap.adjProven.Copy(adjProven);
-      CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyr);
+      CVar cvBlob = CVar.FindCVar("holo_gps_memory_blob");
       if (cvBlob) cvBlob.SetString(SerializeLearningData());
     }
   }
@@ -842,32 +963,24 @@ class HoloGPSHandler : StaticEventHandler {
       for (int i = 0; i < totalAdj; i++) {
         adjProven[i] = false;
       }
-      PlayerInfo plyrInfo = players[consoleplayer];
-      if (plyrInfo) {
-        CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyrInfo);
-        if (cvBlob) cvBlob.SetString("");
-      }
+      CVar cvBlob = CVar.FindCVar("holo_gps_memory_blob");
+      if (cvBlob) cvBlob.SetString("");
 
       Console.Printf("Holographic GPS: Memory database purged. Freed approx. %.2f KB.", estKB);
     } else if (e.Name == "check_gps_memory") {
       int estSize = GetEstimatedDatabaseSize();
       double estKB = estSize / 1024.0;
       Console.Printf("Holographic GPS: %d maps stored in memory database. Approx. %.2f KB saved.", sessionKnowledge.Size(), estKB);
-      PlayerInfo plyrInfo = players[consoleplayer];
-      if (plyrInfo) {
-        CVar cvBlob = CVar.GetCVar("holo_gps_memory_blob", plyrInfo);
-        if (cvBlob) {
-           Console.Printf("HoloGPS Debug: Current live CVAR length is %d", cvBlob.GetString().Length());
-        }
+      CVar cvBlob = CVar.FindCVar("holo_gps_memory_blob");
+      if (cvBlob) {
+         Console.Printf("HoloGPS Debug: Current live CVAR length is %d", cvBlob.GetString().Length());
       }
     } else if (e.Name == "cycle_gps_mode") {
-      PlayerInfo plyr = players[e.Player];
-      if (plyr) {
-        CVar cv = CVar.GetCVar("holo_gps_target_mode", plyr);
-        if (cv) {
-          int currentMode = cv.GetInt();
-          int nextMode = (currentMode + 1) % 4;
-          cv.SetInt(nextMode);
+      CVar cv = CVar.FindCVar("holo_gps_target_mode");
+      if (cv) {
+        int currentMode = cv.GetInt();
+        int nextMode = (currentMode + 1) % 4;
+        cv.SetInt(nextMode);
 
           // Print message to the user HUD or console
           string modeName = "";
@@ -880,7 +993,6 @@ class HoloGPSHandler : StaticEventHandler {
         }
       }
     }
-  }
 
   // Scans the map to identify the next progression objective (keys first, then
   // exits). Why: To automate the progression sequence of picking up keys before
@@ -913,31 +1025,32 @@ class HoloGPSHandler : StaticEventHandler {
       if (cache_priority == 0 || cache_priority == 1) {
 
         ThinkerIterator it = ThinkerIterator.Create(
-            (cache_extended_search || cache_wolfendoom_compat) ? "Inventory"
-                                                               : "Key");
+            (cache_extended_search || cache_wolfendoom_compat || customItems.Size() > 0) ? "Inventory"
+                                                                                         : "Key");
         Inventory mapKey;
         while (mapKey = Inventory(it.Next())) {
           if (mapKey.owner)
             continue;
 
           bool isKey = false;
-          if (mapKey is "Key") {
+          int dummyType, dummyMax;
+          if (mapKey is "Key" || mapKey.bIsKeyItem) {
+            isKey = true;
+          } else if (GetCustomItemType(mapKey, dummyType, dummyMax) && dummyType == 0) {
             isKey = true;
           } else if (cache_extended_search && mapKey.bSPECIAL) {
             string cname = mapKey.GetClassName();
             cname = cname.MakeLower();
 
-            bool hasKeyMatch = false;
-            if (cname.IndexOf("key") == cname.Length() - 3)
-              hasKeyMatch = true;
-            else if (cname.IndexOf("key") == 0)
-              hasKeyMatch = true;
-            else if (cname.IndexOf("card") == cname.Length() - 4)
-              hasKeyMatch = true;
-            else if (cname.IndexOf("skull") == cname.Length() - 5)
-              hasKeyMatch = true;
-
-            if (hasKeyMatch) {
+            if (cname.IndexOf("key") != -1 ||
+                cname.IndexOf("card") != -1 ||
+                cname.IndexOf("skull") != -1 ||
+                cname.IndexOf("pass") != -1 ||
+                cname.IndexOf("token") != -1 ||
+                cname.IndexOf("badge") != -1 ||
+                cname.IndexOf("intel") != -1 ||
+                cname.IndexOf("code") != -1 ||
+                cname.IndexOf("plans") != -1) {
               isKey = true;
             }
           }
@@ -1210,99 +1323,198 @@ class HoloGPSHandler : StaticEventHandler {
           continue;
 
         bool isScavengeable = false;
-        if (inv is "Weapon") {
-          if (!plyr.mo.FindInventory(inv.GetClass())) {
-            isScavengeable = true;
-          }
-        } else if (inv is "BackpackItem") {
-          if (!plyr.mo.FindInventory("BackpackItem")) {
-            isScavengeable = true;
-          }
-        } else if (inv is "Megasphere") {
-          let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
-          int currentArmor = (armor != null) ? armor.Amount : 0;
-          if (plyr.mo.health < 200 || currentArmor < 200) {
-            isScavengeable = true;
-          }
-        } else if (inv is "Berserk") {
-          if (plyr.mo.health < 100 || !plyr.mo.FindInventory("PowerStrength")) {
-            isScavengeable = true;
-          }
-        } else if (inv is "Health") {
-          let hp = Health(inv);
-          int max_limit = hp.MaxAmount;
-          if (max_limit <= 0) {
-            max_limit = plyr.mo.GetMaxHealth();
-          }
-          if (inv is "MaxHealth") {
-            let mhp = MaxHealth(inv);
-            let pPawn = PlayerPawn(plyr.mo);
-            if (pPawn && pPawn.BonusHealth < mhp.MaxAmount) {
-              isScavengeable = true;
-            } else if (plyr.mo.health < max_limit) {
+        int customType, customMax;
+        
+        if (GetCustomItemType(inv, customType, customMax)) {
+          if (customType == 0) { // Key
+            if (!plyr.mo.FindInventory(inv.GetClass())) {
               isScavengeable = true;
             }
-          } else {
-            if (plyr.mo.health < max_limit) {
+          } else if (customType == 1) { // Health
+            if (plyr.mo.health < customMax) {
               isScavengeable = true;
             }
-          }
-        } else if (inv is "BasicArmorPickup") {
-          let ap = BasicArmorPickup(inv);
-          let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
-          int currentArmor = (armor != null) ? armor.Amount : 0;
-          int bonusCount = (armor != null) ? armor.BonusCount : 0;
-          int apSaveAmount = ap.GetSaveAmount();
-          int maxAllowed = apSaveAmount + bonusCount;
-          if (armor != null && armor.MaxAllowedAmount) {
-            maxAllowed = armor.MaxAllowedAmount;
-          }
-          if (currentArmor < maxAllowed) {
-            isScavengeable = true;
-          }
-        } else if (inv is "BasicArmorBonus") {
-          let ab = BasicArmorBonus(inv);
-          let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
-          int currentArmor = (armor != null) ? armor.Amount : 0;
-          int bonusCount = (armor != null) ? armor.BonusCount : 0;
-          int maxAllowed = ab.MaxSaveAmount + bonusCount;
-          if (armor != null && armor.MaxAllowedAmount) {
-            maxAllowed = armor.MaxAllowedAmount;
-          }
-          if (currentArmor < maxAllowed) {
-            isScavengeable = true;
-          }
-        } else if (inv is "HexenArmor") {
-          let ha = HexenArmor(inv);
-          let playerha = HexenArmor(plyr.mo.FindInventory("HexenArmor", true));
-          if (playerha == null) {
-            isScavengeable = true;
-          } else {
-            int slot = ha.Health;
-            int amount = ha.Amount;
-            double hits = (amount <= 0) ? playerha.SlotsIncrement[slot] : amount * 5;
-            if (amount <= 0) {
-              if (playerha.Slots[slot] < hits) {
+          } else if (customType == 2) { // Armor
+            let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
+            int currentArmor = (armor != null) ? armor.Amount : 0;
+            if (currentArmor < customMax) {
+              isScavengeable = true;
+            }
+          } else if (customType == 3) { // Ammo
+            class<Ammo> parentType = (class<Ammo>)(inv.GetClass());
+            if (inv is "Ammo") {
+              parentType = Ammo(inv).GetParentAmmo();
+            }
+            if (parentType) {
+              let playerAmmo = Ammo(plyr.mo.FindInventory(parentType));
+              if (!playerAmmo || playerAmmo.Amount < playerAmmo.MaxAmount) {
                 isScavengeable = true;
               }
             } else {
-              double total = playerha.Slots[0] + playerha.Slots[1] + playerha.Slots[2] + playerha.Slots[3] + playerha.Slots[4];
-              double max = playerha.SlotsIncrement[0] + playerha.SlotsIncrement[1] + playerha.SlotsIncrement[2] + playerha.SlotsIncrement[3] + playerha.Slots[4] + 20;
-              if (total < max) {
-                isScavengeable = true;
-              }
+              isScavengeable = true;
             }
-          }
-        } else if (inv is "Ammo") {
-          let parentType = Ammo(inv).GetParentAmmo();
-          if (parentType) {
-            let playerAmmo = Ammo(plyr.mo.FindInventory(parentType));
-            if (!playerAmmo || playerAmmo.Amount < playerAmmo.MaxAmount) {
+          } else if (customType == 4) { // Backpack
+            if (!plyr.mo.FindInventory("BackpackItem")) {
+              isScavengeable = true;
+            }
+          } else if (customType == 5) { // Megasphere
+            let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
+            int currentArmor = (armor != null) ? armor.Amount : 0;
+            if (plyr.mo.health < customMax || currentArmor < customMax) {
+              isScavengeable = true;
+            }
+          } else if (customType == 6) { // Berserk
+            if (plyr.mo.health < 100 || !plyr.mo.FindInventory("PowerStrength")) {
               isScavengeable = true;
             }
           }
-        } else if (inv is "Armor") {
-          isScavengeable = true;
+        } else {
+          // Fallback to dynamic heuristics
+          string cname = inv.GetClassName();
+          cname = cname.MakeLower();
+
+          bool isBackpack = (inv is "BackpackItem" || cname.IndexOf("backpack") != -1);
+          bool isMegasphere = (inv is "Megasphere" || cname.IndexOf("megasphere") != -1);
+          bool isBerserk = (inv is "Berserk" || cname.IndexOf("berserk") != -1);
+          bool isHealth = (inv is "Health" || inv.bIsHealth ||
+                           cname.IndexOf("health") != -1 || cname.IndexOf("med") != -1 ||
+                           cname.IndexOf("stim") != -1 || cname.IndexOf("kit") != -1 ||
+                           cname.IndexOf("ration") != -1 || cname.IndexOf("potion") != -1 ||
+                           cname.IndexOf("vial") != -1);
+          bool isArmor = (inv is "BasicArmorPickup" || inv is "BasicArmorBonus" || inv is "HexenArmor" ||
+                          inv.bIsArmor || inv is "Armor" ||
+                          cname.IndexOf("armor") != -1 || cname.IndexOf("vest") != -1 ||
+                          cname.IndexOf("shield") != -1 || cname.IndexOf("helmet") != -1 ||
+                          cname.IndexOf("shard") != -1 || cname.IndexOf("scrap") != -1);
+          bool isAmmo = (inv is "Ammo" ||
+                         cname.IndexOf("ammo") != -1 || cname.IndexOf("clip") != -1 ||
+                         cname.IndexOf("bullet") != -1 || cname.IndexOf("shell") != -1 ||
+                         cname.IndexOf("cell") != -1 || cname.IndexOf("rocket") != -1 ||
+                         cname.IndexOf("missile") != -1);
+
+          if (inv is "Weapon") {
+            if (!plyr.mo.FindInventory(inv.GetClass())) {
+              isScavengeable = true;
+            }
+          } else if (isBackpack) {
+            if (!plyr.mo.FindInventory("BackpackItem")) {
+              isScavengeable = true;
+            }
+          } else if (isMegasphere) {
+            let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
+            int currentArmor = (armor != null) ? armor.Amount : 0;
+            if (plyr.mo.health < 200 || currentArmor < 200) {
+              isScavengeable = true;
+            }
+          } else if (isBerserk) {
+            if (plyr.mo.health < 100 || !plyr.mo.FindInventory("PowerStrength")) {
+              isScavengeable = true;
+            }
+          } else if (isHealth) {
+            int max_limit = 0;
+            if (inv is "Health") {
+              let hp = Health(inv);
+              max_limit = hp.MaxAmount;
+            }
+            if (max_limit <= 0) {
+              if (cname.IndexOf("bonus") != -1 || cname.IndexOf("vial") != -1 ||
+                  cname.IndexOf("potion") != -1 || cname.IndexOf("super") != -1 ||
+                  cname.IndexOf("soul") != -1 || cname.IndexOf("mega") != -1) {
+                max_limit = plyr.mo.GetMaxHealth() * 2;
+              } else {
+                max_limit = plyr.mo.GetMaxHealth();
+              }
+            }
+
+            if (inv is "MaxHealth") {
+              let mhp = MaxHealth(inv);
+              let pPawn = PlayerPawn(plyr.mo);
+              if (pPawn && pPawn.BonusHealth < mhp.MaxAmount) {
+                isScavengeable = true;
+              } else if (plyr.mo.health < max_limit) {
+                isScavengeable = true;
+              }
+            } else {
+              if (plyr.mo.health < max_limit) {
+                isScavengeable = true;
+              }
+            }
+          } else if (isArmor) {
+            if (inv is "BasicArmorPickup") {
+              let ap = BasicArmorPickup(inv);
+              let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
+              int currentArmor = (armor != null) ? armor.Amount : 0;
+              int bonusCount = (armor != null) ? armor.BonusCount : 0;
+              int apSaveAmount = ap.GetSaveAmount();
+              int maxAllowed = apSaveAmount + bonusCount;
+              if (armor != null && armor.MaxAllowedAmount) {
+                maxAllowed = armor.MaxAllowedAmount;
+              }
+              if (currentArmor < maxAllowed) {
+                isScavengeable = true;
+              }
+            } else if (inv is "BasicArmorBonus") {
+              let ab = BasicArmorBonus(inv);
+              let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
+              int currentArmor = (armor != null) ? armor.Amount : 0;
+              int bonusCount = (armor != null) ? armor.BonusCount : 0;
+              int maxAllowed = ab.MaxSaveAmount + bonusCount;
+              if (armor != null && armor.MaxAllowedAmount) {
+                maxAllowed = armor.MaxAllowedAmount;
+              }
+              if (currentArmor < maxAllowed) {
+                isScavengeable = true;
+              }
+            } else if (inv is "HexenArmor") {
+              let ha = HexenArmor(inv);
+              let playerha = HexenArmor(plyr.mo.FindInventory("HexenArmor", true));
+              if (playerha == null) {
+                isScavengeable = true;
+              } else {
+                int slot = ha.Health;
+                int amount = ha.Amount;
+                double hits = (amount <= 0) ? playerha.SlotsIncrement[slot] : amount * 5;
+                if (amount <= 0) {
+                  if (playerha.Slots[slot] < hits) {
+                    isScavengeable = true;
+                  }
+                } else {
+                  double total = playerha.Slots[0] + playerha.Slots[1] + playerha.Slots[2] + playerha.Slots[3] + playerha.Slots[4];
+                  double max = playerha.SlotsIncrement[0] + playerha.SlotsIncrement[1] + playerha.SlotsIncrement[2] + playerha.SlotsIncrement[3] + playerha.Slots[4] + 20;
+                  if (total < max) {
+                    isScavengeable = true;
+                  }
+                }
+              }
+            } else {
+              // Custom armor heuristic
+              let armor = BasicArmor(plyr.mo.FindInventory("BasicArmor", true));
+              int currentArmor = (armor != null) ? armor.Amount : 0;
+              int maxAllowed = 100;
+              if (cname.IndexOf("bonus") != -1 || cname.IndexOf("shard") != -1 ||
+                  cname.IndexOf("scrap") != -1 || cname.IndexOf("helmet") != -1 ||
+                  cname.IndexOf("blue") != -1 || cname.IndexOf("mega") != -1 ||
+                  cname.IndexOf("heavy") != -1 || cname.IndexOf("super") != -1) {
+                maxAllowed = 200;
+              }
+              if (currentArmor < maxAllowed) {
+                isScavengeable = true;
+              }
+            }
+          } else if (isAmmo) {
+            class<Ammo> parentType = (class<Ammo>)(inv.GetClass());
+            if (inv is "Ammo") {
+              parentType = Ammo(inv).GetParentAmmo();
+            }
+            if (parentType) {
+              let playerAmmo = Ammo(plyr.mo.FindInventory(parentType));
+              if (!playerAmmo || playerAmmo.Amount < playerAmmo.MaxAmount) {
+                isScavengeable = true;
+              }
+            } else {
+              isScavengeable = true;
+            }
+          }
         }
 
         if (isScavengeable) {
@@ -1422,13 +1634,6 @@ class HoloGPSHandler : StaticEventHandler {
           lastPortalNormallyBlocked = true;
         }
       }
-    }
-
-    if (isProven) return true;
-
-    if (abs(nextFloor - curFloor) > cache_step_max) {
-      if (!ignoreLocks) return false;
-      lastPortalNormallyBlocked = true;
     }
 
     return true;
@@ -2271,6 +2476,10 @@ class HoloGPSHandler : StaticEventHandler {
     if (cache_max_markers < 1)
       cache_max_markers = 1;
 
+    if (cache_use_particles) {
+      ClearOldMarkers();
+    }
+
     Vector2 prevPoint = player.pos.xy;
     Vector2 lastSpawnPos = player.pos.xy;
     double currentZ = player.pos.z;
@@ -2319,6 +2528,42 @@ class HoloGPSHandler : StaticEventHandler {
         double floorz = GetFloorZ(spawnXY, currentZ);
         currentZ = floorz;
         Vector3 spawnPos = (spawnXY.x, spawnXY.y, floorz + cache_height);
+
+        if (cache_use_particles) {
+          double markerAlpha = cache_alpha;
+          if (cache_fade) {
+            markerAlpha =
+                cache_alpha *
+                (1.0 - (double(spawnedCount) / double(cache_max_markers)));
+          }
+
+          color col = 0x5BCEFA; // Default Cyan
+          bool isHazard = IsSectorHazardous(spawnSec);
+          if (isHazard) {
+            col = 0xFF0000;
+          } else if (cache_color == 9) {
+            col = TRANS_COLORS[spawnedCount % 4];
+          } else if (cache_color >= 1 && cache_color <= 8) {
+            col = COLOR_TABLE[cache_color];
+          }
+
+          double scaleVal = (cache_scale <= 0.0) ? 0.25 : cache_scale;
+          Color partColor = Color(int(markerAlpha * 255), (col >> 16) & 0xFF, (col >> 8) & 0xFF, col & 0xFF);
+          
+          FSpawnParticleParams params;
+          params.color1 = partColor;
+          params.pos = spawnPos;
+          params.size = scaleVal * 16.0;
+          params.lifetime = cache_freq + 2;
+          params.startalpha = markerAlpha;
+          params.fadestep = -1.0;
+          params.style = (cache_style == 1) ? STYLE_Translucent : STYLE_Add;
+          level.SpawnParticle(params);
+
+          spawnedCount++;
+          lastSpawnPos = spawnXY;
+          continue;
+        }
 
         Actor marker;
         // Reuse existing pooled marker to bypass the expensive instantiation of

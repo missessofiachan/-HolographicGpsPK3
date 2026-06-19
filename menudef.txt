@@ -83,6 +83,7 @@ OptionMenu "HoloGPSMenu"
     Option "Portal Navigation Support", "holo_gps_portals", "OnOff"
     Option "Switch & Lock Solver Fallback", "holo_gps_solve_switches", "OnOff"
     Option "Path Corner Smoothing", "holo_gps_smoothing", "OnOff"
+    Option "Use Client Particles (Lag-Free)", "holo_gps_use_particles", "OnOff"
 
     StaticText "" // Blank spacer line
     StaticText "Advanced Engine Tuning", 1
